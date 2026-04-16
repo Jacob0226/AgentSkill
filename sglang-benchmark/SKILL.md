@@ -121,6 +121,7 @@ Script: `~/SGLang-benchmarks/GLM.sh`
 ## Analysis Tools
 
 All scripts live in `~/SGLang-benchmarks/`. For detailed usage see [analysis-tools.md](analysis-tools.md).
+For ROCm HIP stream/event/graph programming model, see [rocm-streams.md](rocm-streams.md).
 
 | Script | Purpose |
 |--------|---------|
