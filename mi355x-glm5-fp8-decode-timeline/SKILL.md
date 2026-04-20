@@ -1,13 +1,13 @@
 ---
-name: mi355x-decode-timeline
+name: mi355x-glm5-fp8-decode-timeline
 description: >-
-  MI355X GLM5 decode layer dual-stream kernel timeline reference. Use when
-  analyzing MI355X decode performance, understanding dual-stream overlap
+  MI355X GLM-5-FP8 decode layer dual-stream kernel timeline reference. Use when
+  analyzing MI355X GLM-5-FP8 decode performance, understanding dual-stream overlap
   (current_stream vs alt_stream), creating kernel timeline visualizations,
   or investigating decode layer latency breakdown.
 ---
 
-# MI355X GLM5 Decode Layer Timeline
+# MI355X GLM-5-FP8 Decode Layer Timeline
 
 Reference for the dual-stream kernel execution pattern in one GLM-5 decode layer on AMD MI355X (TP=8, FP8).
 
