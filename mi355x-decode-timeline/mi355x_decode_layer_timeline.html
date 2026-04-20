@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MI355X GLM5 Decode Layer — Dual Stream Timeline</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0e17; --bg2: #111827; --bg3: #1e293b;
+  --fg: #e2e8f0; --fg2: #94a3b8;
+  --accent1: #38bdf8; --accent2: #f472b6;
+  --gemm-ck: #22d3ee; --gemm-rocblas: #fb923c; --gemm-hipblas: #fbbf24;
+  --attn: #818cf8; --comm: #f87171; --quant: #4ade80;
+  --norm: #a78bfa; --moe: #e879f9; --misc: #475569;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--fg); font-family:'DM Sans',sans-serif; padding:28px 36px; }
+h1 { font-family:'JetBrains Mono',monospace; font-size:22px; font-weight:700; color:var(--accent1); margin-bottom:2px; }
+.sub { font-size:13px; color:var(--fg2); margin-bottom:20px; font-family:'JetBrains Mono',monospace; }
+.legend { display:flex; flex-wrap:wrap; gap:14px; margin-bottom:18px; padding:10px 16px; background:var(--bg2); border-radius:8px; border:1px solid var(--bg3); }
+.leg-i { display:flex; align-items:center; gap:6px; font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--fg2); }
+.swatch { width:14px; height:10px; border-radius:2px; flex-shrink:0; }
+.tl-wrap { position:relative; overflow-x:auto; background:var(--bg2); border-radius:10px; border:1px solid var(--bg3); padding:40px 20px 24px; }
+.phase-row { position:relative; height:0; margin-left:130px; }
+.phase-band { position:absolute; top:-28px; height:136px; border-left:1px dashed rgba(255,255,255,0.1); border-right:1px dashed rgba(255,255,255,0.1); pointer-events:none; }
+.phase-lbl { position:absolute; top:0; left:4px; font-family:'JetBrains Mono',monospace; font-size:10px; white-space:nowrap; }
+.row { position:relative; height:44px; margin-bottom:8px; }
+.row-lbl { position:absolute; left:0; top:0; width:130px; height:44px; display:flex; flex-direction:column; justify-content:center; font-family:'JetBrains Mono',monospace; font-size:13px; font-weight:600; z-index:2; }
+.row-lbl small { font-size:9px; font-weight:400; color:var(--fg2); }
+.track { position:absolute; left:130px; top:4px; height:36px; }
+.bar { position:absolute; height:30px; top:3px; border-radius:3px; font-family:'JetBrains Mono',monospace; font-size:8.5px; color:#fff; display:flex; align-items:center; justify-content:center; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; padding:0 3px; cursor:default; border:1px solid rgba(255,255,255,0.18); transition:filter .12s; }
+.bar:hover { filter:brightness(1.3); z-index:10; border-color:#fff; }
+.idle-marker { position:absolute; height:30px; top:3px; border-radius:3px; background:repeating-linear-gradient(135deg,transparent,transparent 3px,rgba(255,255,255,0.03) 3px,rgba(255,255,255,0.03) 6px); border:1px dashed rgba(255,255,255,0.08); display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono',monospace; font-size:9px; color:rgba(255,255,255,0.2); }
+.axis { position:relative; height:22px; margin-left:130px; margin-top:4px; }
+.tick { position:absolute; bottom:0; font-family:'JetBrains Mono',monospace; font-size:9px; color:var(--fg2); transform:translateX(-50%); }
+.tick::before { content:''; position:absolute; top:-4px; left:50%; width:1px; height:4px; background:var(--fg2); }
+.tip { position:fixed; background:#1e293b; border:1px solid #475569; border-radius:6px; padding:8px 11px; font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--fg); pointer-events:none; z-index:100; display:none; max-width:320px; line-height:1.6; box-shadow:0 8px 28px rgba(0,0,0,0.6); }
+.stats { margin-top:18px; display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; }
+.scard { background:var(--bg2); border:1px solid var(--bg3); border-radius:8px; padding:12px 14px; }
+.scard h3 { font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--fg2); margin-bottom:5px; text-transform:uppercase; letter-spacing:.5px; }
+.scard .v { font-family:'JetBrains Mono',monospace; font-size:24px; font-weight:700; }
+.scard .u { font-size:12px; color:var(--fg2); }
+</style>
+</head>
+<body>
+<h1>MI355X GLM5 Decode Layer — Kernel Timeline</h1>
+<p class="sub">Stream 113 (current_stream) &amp; Stream 106 (alt_stream) &nbsp;|&nbsp; 1 decoder layer ≈ 397 μs</p>
+<div class="legend" id="legend"></div>
+<div class="tl-wrap" id="wrap">
+  <div class="phase-row" id="phases"></div>
+  <div class="row">
+    <div class="row-lbl" style="color:var(--accent2)">Stream 106<small>alt_stream</small></div>
+    <div class="track" id="t106"></div>
+  </div>
+  <div class="row">
+    <div class="row-lbl" style="color:var(--accent1)">Stream 113<small>current_stream</small></div>
+    <div class="track" id="t113"></div>
+  </div>
+  <div class="axis" id="axis"></div>
+</div>
+<div class="stats" id="stats"></div>
+<div class="tip" id="tip"></div>
+
+<script>
+const PPU = 3.0;
+const MAX = 400;
+const TW = MAX * PPU;
+
+const catC = {
+  gemm_ck:'var(--gemm-ck)', gemm_rocblas:'var(--gemm-rocblas)', gemm_hipblas:'var(--gemm-hipblas)',
+  attn:'var(--attn)', comm:'var(--comm)', quant:'var(--quant)',
+  norm:'var(--norm)', moe:'var(--moe)', misc:'var(--misc)'
+};
+const catL = {
+  gemm_ck:'GEMM (CK)', gemm_rocblas:'GEMM (rocBLAS)', gemm_hipblas:'GEMM (hipBLASLt)',
+  attn:'Attention / RoPE', comm:'AllReduce', quant:'Quantize',
+  norm:'Norm (RMS/Layer)', moe:'MoE Routing', misc:'Misc / Elementwise'
+};
+
+const s113 = [
+  {ts:1.5,dur:3.8,l:'elem_add (prev join)',c:'misc'},
+  {ts:5.4,dur:15.0,l:'allreduce',c:'comm'},
+  {ts:20.4,dur:5.0,l:'rms+fp8_quant',c:'quant'},
+  {ts:25.4,dur:40.7,l:'fused_qkv_a_proj (CK)',c:'gemm_ck'},
+  {ts:66.1,dur:4.4,l:'q_a / kv_a layernorm',c:'norm'},
+  {ts:79.7,dur:2.5,l:'quant (q_b_proj)',c:'quant'},
+  {ts:82.3,dur:9.1,l:'q_b_proj (CK)',c:'gemm_ck'},
+  {ts:218.7,dur:6.2,l:'bmm w_kc (absorb)',c:'attn'},
+  {ts:224.9,dur:5.1,l:'qk_rope + cache',c:'attn'},
+  {ts:230.0,dur:7.3,l:'CatBatchCopy',c:'misc'},
+  {ts:237.3,dur:10.6,l:'attn_kernel_1',c:'attn'},
+  {ts:247.9,dur:9.7,l:'attn_kernel_2',c:'attn'},
+  {ts:257.5,dur:7.7,l:'bmm w_vc (absorb)',c:'attn'},
+  {ts:265.2,dur:4.9,l:'fp8_quant',c:'quant'},
+  {ts:270.1,dur:10.1,l:'o_proj (CK)',c:'gemm_ck'},
+  {ts:280.3,dur:23.4,l:'allreduce',c:'comm'},
+  {ts:303.6,dur:5.3,l:'pre-MoE rmsnorm',c:'norm'},
+  {ts:309.0,dur:4.8,l:'shared quant',c:'quant'},
+  {ts:313.7,dur:22.6,l:'shared gate_up (CK)',c:'gemm_ck'},
+  {ts:336.4,dur:4.4,l:'SiLU * gate',c:'misc'},
+  {ts:340.7,dur:4.4,l:'shared quant',c:'quant'},
+  {ts:345.2,dur:5.2,l:'shared down (CK)',c:'gemm_ck'},
+  {ts:394.2,dur:3.7,l:'elem_add (MoE join)',c:'misc'},
+];
+
+const s106 = [
+  {ts:72.1,dur:2.1,l:'indexer rmsnorm',c:'norm'},
+  {ts:79.6,dur:2.4,l:'indexer quant',c:'quant'},
+  {ts:82.0,dur:8.1,l:'wq_b GEMM (CK)',c:'gemm_ck'},
+  {ts:90.1,dur:23.4,l:'wk GEMM (CK)',c:'gemm_ck'},
+  {ts:113.5,dur:4.6,l:'k_norm',c:'norm'},
+  {ts:118.1,dur:9.7,l:'RoPE (aiter)',c:'attn'},
+  {ts:127.8,dur:4.7,l:'hadamard_q',c:'misc'},
+  {ts:132.5,dur:4.8,l:'hadamard_k',c:'misc'},
+  {ts:137.3,dur:6.0,l:'act_quant_q',c:'quant'},
+  {ts:143.3,dur:4.6,l:'act_quant_k',c:'quant'},
+  {ts:147.9,dur:4.8,l:'store_k_cache',c:'misc'},
+  {ts:152.8,dur:4.6,l:'to_copy (triton)',c:'misc'},
+  {ts:157.3,dur:7.7,l:'weights_proj (rocBLAS)',c:'gemm_rocblas'},
+  {ts:165.0,dur:6.4,l:'hipBLAS GEMM',c:'gemm_hipblas'},
+  {ts:171.4,dur:4.9,l:'scale * mul',c:'misc'},
+  {ts:176.3,dur:5.9,l:'fill(-inf)',c:'misc'},
+  {ts:182.2,dur:9.9,l:'paged_mqa_logits',c:'attn'},
+  {ts:192.1,dur:21.2,l:'topk_transform',c:'moe'},
+  {ts:314.3,dur:8.7,l:'wv_splitk (router)',c:'moe'},
+  {ts:323.0,dur:5.2,l:'grouped_topk',c:'moe'},
+  {ts:328.2,dur:8.0,l:'MoeSorting',c:'moe'},
+  {ts:336.2,dur:4.7,l:'routed quant',c:'quant'},
+  {ts:340.8,dur:4.9,l:'Memset',c:'misc'},
+  {ts:345.8,dur:21.9,l:'routed up (CK)',c:'gemm_ck'},
+  {ts:367.7,dur:5.0,l:'SiLU * gate',c:'misc'},
+  {ts:372.6,dur:4.9,l:'routed quant',c:'quant'},
+  {ts:377.6,dur:11.1,l:'routed down (CK)',c:'gemm_ck'},
+];
+
+const ph = [
+  {s:0,e:66,l:'Pre-Attention (serial)',bg:'rgba(100,116,139,0.06)',lc:'#64748b'},
+  {s:66,e:218,l:'Attn Dual-Stream: q_b_proj ∥ NSA Indexer',bg:'rgba(34,211,238,0.07)',lc:'#22d3ee'},
+  {s:218,e:303,l:'Attn Core + AllReduce (serial)',bg:'rgba(248,113,113,0.05)',lc:'#f87171'},
+  {s:303,e:394,l:'MoE Dual-Stream: shared ∥ routed',bg:'rgba(232,121,249,0.07)',lc:'#e879f9'},
+];
+
+const idleZones113 = [{s:91.3,e:218.7,l:'IDLE (waiting for indexer on S106)'},{s:350.3,e:394.2,l:'IDLE (waiting for routed)'}];
+const idleZones106 = [{s:213.4,e:314.3,l:'IDLE (waiting for attn core on S113)'}];
+
+function build() {
+  const leg = document.getElementById('legend');
+  for (const [k,v] of Object.entries(catL)) {
+    const d = document.createElement('div'); d.className='leg-i';
+    d.innerHTML = `<span class="swatch" style="background:${catC[k]}"></span>${v}`;
+    leg.appendChild(d);
+  }
+
+  const phD = document.getElementById('phases');
+  ph.forEach(p => {
+    const el = document.createElement('div'); el.className='phase-band';
+    el.style.left = p.s*PPU+'px'; el.style.width = (p.e-p.s)*PPU+'px'; el.style.background = p.bg;
+    const lb = document.createElement('div'); lb.className='phase-lbl'; lb.style.color=p.lc; lb.textContent=p.l;
+    el.appendChild(lb); phD.appendChild(el);
+  });
+
+  function bars(id, data, idles) {
+    const tr = document.getElementById(id); tr.style.width = TW+'px';
+    data.forEach(k => {
+      const el = document.createElement('div'); el.className='bar';
+      el.style.left = k.ts*PPU+'px'; el.style.width = Math.max(k.dur*PPU,3)+'px';
+      el.style.background = catC[k.c];
+      if (k.dur*PPU > 50) el.textContent = k.l;
+      el.onmouseenter = e => showT(e,k);
+      el.onmousemove = moveT;
+      el.onmouseleave = hideT;
+      tr.appendChild(el);
+    });
+    idles.forEach(z => {
+      const el = document.createElement('div'); el.className='idle-marker';
+      el.style.left = z.s*PPU+'px'; el.style.width = (z.e-z.s)*PPU+'px';
+      el.textContent = z.l;
+      tr.appendChild(el);
+    });
+  }
+  bars('t113', s113, idleZones113);
+  bars('t106', s106, idleZones106);
+
+  const ax = document.getElementById('axis'); ax.style.width = TW+'px';
+  for (let t=0; t<=MAX; t+=50) {
+    const tk = document.createElement('div'); tk.className='tick';
+    tk.style.left = t*PPU+'px'; tk.textContent = t+'μs'; ax.appendChild(tk);
+  }
+
+  const sd = document.getElementById('stats');
+  [
+    {l:'Total Layer',v:'~397',u:'μs',co:'var(--accent1)'},
+    {l:'Attn Dual (q_b_proj ∥ indexer)',v:'152',u:'μs (saves ~12μs)',co:'var(--gemm-ck)'},
+    {l:'Attn Sequential (core+AR)',v:'85',u:'μs',co:'var(--attn)'},
+    {l:'MoE Dual (shared ∥ routed)',v:'91',u:'μs (saves ~36μs)',co:'var(--moe)'},
+    {l:'AllReduce (pure serial)',v:'38',u:'μs total',co:'var(--comm)'},
+    {l:'Dual-Stream Savings',v:'~48',u:'μs (≈11%)',co:'var(--quant)'},
+  ].forEach(d => {
+    const c = document.createElement('div'); c.className='scard';
+    c.innerHTML = `<h3>${d.l}</h3><span class="v" style="color:${d.co}">${d.v}</span> <span class="u">${d.u}</span>`;
+    sd.appendChild(c);
+  });
+}
+
+function showT(e,k) {
+  const t = document.getElementById('tip');
+  t.innerHTML = `<b>${k.l}</b><br>start: ${k.ts.toFixed(1)} μs<br>dur: <b>${k.dur.toFixed(1)} μs</b><br>end: ${(k.ts+k.dur).toFixed(1)} μs<br>type: ${catL[k.c]}`;
+  t.style.display='block'; moveT(e);
+}
+function moveT(e) {
+  const t = document.getElementById('tip');
+  t.style.left = (e.clientX+14)+'px'; t.style.top = (e.clientY-12)+'px';
+}
+function hideT() { document.getElementById('tip').style.display='none'; }
+
+build();
+</script>
+</body>
+</html>
