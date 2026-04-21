@@ -130,8 +130,8 @@ Each stream's data is a JS array of kernel objects:
 
 ```javascript
 const stream_data = [
-  {ts: 1.5, dur: 3.8, l: 'elem_add', c: 'misc'},
-  {ts: 5.4, dur: 15.0, l: 'allreduce', c: 'comm'},
+  {ts: 1.5, dur: 3.8, l: 'elem_add (prev join)', c: 'misc', d: 'Combine shared+routed MoE outputs from prev layer'},
+  {ts: 5.4, dur: 15.0, l: 'allreduce', c: 'comm', d: 'AllReduce MoE output across 8 TP ranks'},
   // ...
 ];
 ```
@@ -141,6 +141,7 @@ Fields:
 - `dur`: duration (μs)
 - `l`: human-readable label — from Step 3
 - `c`: category key — from Step 2
+- `d`: description of what this kernel computes (shown in hover tooltip) — derived from source code reading
 
 #### Phase Bands
 
@@ -235,6 +236,57 @@ in the same HTML file. Each section gets its own:
 
 See the reference HTML for how MI355X (2 streams) and B200 (4 streams) are placed
 in the same page with a separator between them.
+
+---
+
+## Worked Example: GLM-5-FP8 (MI355X + B200)
+
+The reference HTML [glm5_fp8_decode_timeline.html](glm5_fp8_decode_timeline.html) is a complete
+worked example. Open it and study the `<script>` section (line ~442 onward) to see the exact
+output format for every step of this process.
+
+### What the example demonstrates
+
+**Kernel data with all fields** — every kernel has `ts`, `dur`, `l`, `c`, and `d`.
+Here are the first few entries from MI355X stream 113 (current_stream) showing how
+raw CSV kernels become annotated timeline objects:
+
+| CSV kernel_short | → label (`l`) | → description (`d`) |
+|-----------------|---------------|---------------------|
+| `elementwise` (CUDAFunctor_add) | `elem_add (prev join)` | Combine shared+routed MoE outputs from prev layer (line 578) |
+| `cross_device_reduce` | `allreduce` | AllReduce MoE output across 8 TP ranks |
+| `fused_rms_fp8_group_quant` | `rms+fp8_quant` | Fused: residual add + RMSNorm + FP8 quant for next GEMM |
+| `ABScale_GEMM (CK)` #1 | `fused_qkv_a_proj (CK)` | (B,7168)@(7168,2112)→split(q_a[1536], kv_a[512], k_rope[64]) |
+| `add_rmsnorm_quant` | `q_a / kv_a layernorm` | LayerNorm on q_a and kv_a latent vectors |
+| `ABScale_GEMM (CK)` #2 | `q_b_proj (CK)` | Expand q_a→full Q: (B,1536)→(B,128h,192d=24576) |
+| `batched_gemm_a8w8` #1 | `bmm w_kc (absorb)` | Absorb W_kc into Q_nope: (B,128,128)@W_kc→(B,128,512) |
+| `main_kernel` #1 | `attn_kernel_1` | Full MLA decode attention (128 heads, full KV cache seq) |
+| `main_kernel` #2 | `attn_kernel_2` | NSA sparse attention using top-16 block indices from indexer |
+| `batched_gemm_a8w8` #2 | `bmm w_vc (absorb)` | Absorb W_vc: attn_out(512)×W_vc→V_out(128) per head |
+| `ABScale_GEMM (CK)` #3 | `o_proj (CK)` | Output projection: (B,128h×128d=16384)→(B,7168) |
+| `ABScale_GEMM (CK)` #4 | `shared gate_up (CK)` | Shared expert FFN gate+up: (B,7168)→(B,4096=2×2048) |
+| `ABScale_GEMM (CK)` #5 | `shared down (CK)` | Shared expert FFN down: (B,2048)→(B,7168) |
+
+Key insight: `ABScale_GEMM (CK)` appears 5+ times — only the **execution order** + **source code reading** distinguishes them.
+
+**Architecture SVG** — the `<svg>` in tab-arch shows how to build a visual layer diagram with:
+- Sections for each phase (pre-attention, dual-stream fork, attention core, MoE dual-stream)
+- Weight matrix shapes and dimensions inside each GEMM block
+- Head count annotations
+- Fork/join arrows between streams
+- Reference tables for head counts, KV cache layout, weight shapes
+
+**Multi-GPU comparison** — shows MI355X (2 streams) and B200 (4 streams) in the same page,
+each with different stream counts, phase structures, and overlap patterns.
+
+**B200-specific patterns** — demonstrates:
+- 4-stream cross-layer pipelining (SBO)
+- Fused allreduce+residual (`allreduce_fusion`)
+- SBO prep kernels (pre-computing next layer's qkv_a_proj during idle)
+- Overlap boxes highlighting where parallel execution saves time
+
+Use this HTML as both a reference for expected output quality and as a starting template
+when building a new timeline for a different model.
 
 ---
 
