@@ -6,6 +6,14 @@ SKILLS_DIR="$HOME/.cursor/skills"
 
 mkdir -p "$SKILLS_DIR"
 
+# Clean up dangling symlinks (e.g. after skill renames)
+for link in "$SKILLS_DIR"/*/; do
+    [ -L "${link%/}" ] && [ ! -e "${link%/}" ] && {
+        echo "Removing dangling symlink: ${link%/}"
+        rm "${link%/}"
+    }
+done
+
 for skill_dir in "$SCRIPT_DIR"/*/; do
     [ -f "$skill_dir/SKILL.md" ] || continue
     skill_name="$(basename "$skill_dir")"
