@@ -18,7 +18,7 @@ description: >-
 | Host (edit here) | `~/PR/sglang` | Fork: `Jacob0226/sglang`. Make all code changes here. |
 | Container (run here) | `~/work-space/sglang` | Checkout the branch from the fork, then run server/benchmarks. |
 | Benchmarks | `~/SGLang-benchmarks/` | Benchmark scripts, profiler parsers, analysis tools. |
-| Reusable helper scripts | `~/SGLang-benchmarks/tools/` | **All Python / HTML tools and unit tests go here** (e.g. `glm5_decode_layer.py`, `glm5_proposalA_test_v2.py`, `analyze_trace_overlap.py`, `mi355x_decode_layer_timeline.html`). |
+| Reusable helper scripts | `~/SGLang-benchmarks/tools/` | **All Python / HTML tools and unit tests go here** (e.g. `glm5_decode_layer.py`, `glm5_proposalA_v3_test.py`, `glm5_proposalA_overlap_analysis.py`, `analyze_trace_overlap.py`, `mi355x_decode_layer_timeline.html`). |
 | Scratch / ad-hoc outputs | `~/SGLang-benchmarks/tmp/` | **Outputs only** — trace dumps, one-off HTMLs produced by tool runs, temporary CSVs. Do NOT put executable helper scripts here; any new script should live under `tools/`. Same host↔container path (`/home/jacchang/SGLang-benchmarks/tmp/` is mounted into the container). |
 
 ### Edit → Run Cycle
