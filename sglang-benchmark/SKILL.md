@@ -18,7 +18,8 @@ description: >-
 | Host (edit here) | `~/PR/sglang` | Fork: `Jacob0226/sglang`. Make all code changes here. |
 | Container (run here) | `~/work-space/sglang` | Checkout the branch from the fork, then run server/benchmarks. |
 | Benchmarks | `~/SGLang-benchmarks/` | Benchmark scripts, profiler parsers, analysis tools. |
-| Test scripts | `~/SGLang-benchmarks/tmp/` | Ad-hoc test scripts and experiments. |
+| Reusable helper scripts | `~/SGLang-benchmarks/tools/` | **All Python / HTML tools and unit tests go here** (e.g. `glm5_decode_layer.py`, `glm5_proposalA_test_v2.py`, `analyze_trace_overlap.py`, `mi355x_decode_layer_timeline.html`). |
+| Scratch / ad-hoc outputs | `~/SGLang-benchmarks/tmp/` | **Outputs only** — trace dumps, one-off HTMLs produced by tool runs, temporary CSVs. Do NOT put executable helper scripts here; any new script should live under `tools/`. Same host↔container path (`/home/jacchang/SGLang-benchmarks/tmp/` is mounted into the container). |
 
 ### Edit → Run Cycle
 
@@ -149,6 +150,51 @@ python3 ~/SGLang-benchmarks/compare_breakdown.py \
     --file-b B200/step3_layer_breakdown.xlsx \
     --labels MI355X B200 --out comparison.xlsx
 ```
+
+---
+
+## HIP Graph Dispatch-Order Rule (dual-stream gotcha)
+
+On ROCm / HIP Graph, the replay scheduler picks a physical stream for each branch of a
+fork based on **dispatch order during capture**, not on which `torch.cuda.Stream` object
+you passed. Rule:
+
+> At each fork point, the branch whose first kernel is captured FIRST stays on the same
+> physical stream as the predecessor (e.g. `phys 0`). The later-captured branch gets a
+> new physical stream (`phys 4/5/8/…`).
+
+Both `alt_stream.wait_stream(cur)` and explicit `record_event`/`wait_event` pairs behave
+identically here — the sync primitive does not influence the choice.
+
+**Symptom:** your `with torch.cuda.stream(alt):` block's kernels show up on `phys 0` in the
+trace, and kernels you dispatched on `cur` land on `phys 4/5`. Looks like a remap but isn't
+— it's the rule above.
+
+**Fix:** dispatch the cur-side work *before* the `with torch.cuda.stream(alt):` block so cur's
+chain is captured first.
+
+```python
+# BAD — alt captured first, indexer steals phys 0
+alt_stream.wait_stream(cur)
+with torch.cuda.stream(alt_stream):
+    topk_ids = indexer(...)        # 1st dispatch → phys 0 (not what you want)
+kv_normed = rms_norm(...)          # 2nd dispatch → phys 4
+q_all = gap_fill(...)
+cur.wait_stream(alt_stream)
+
+# GOOD — cur captured first, stays on phys 0
+alt_stream.wait_stream(cur)
+kv_normed = rms_norm(...)          # 1st dispatch → phys 0 ✓
+q_all = gap_fill(...)
+with torch.cuda.stream(alt_stream):
+    topk_ids = indexer(...)        # 2nd dispatch → phys 4 ✓
+cur.wait_stream(alt_stream)
+```
+
+Confirmed on MI355X with `tools/glm5_proposalA_v3_test.py`. The "bad" layout can actually be
+~5 μs *faster* (HIP packs more serial work on phys 0), but traces are unreadable. Prefer the
+"good" layout for analysis; drop to "bad" only if you are chasing every last μs and know
+what you are reading.
 
 ---
 
