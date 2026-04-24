@@ -153,48 +153,82 @@ python3 ~/SGLang-benchmarks/compare_breakdown.py \
 
 ---
 
-## HIP Graph Dispatch-Order Rule (dual-stream gotcha)
+## HIP Graph dual-stream gotchas (two rules that bite together)
 
-On ROCm / HIP Graph, the replay scheduler picks a physical stream for each branch of a
-fork based on **dispatch order during capture**, not on which `torch.cuda.Stream` object
-you passed. Rule:
+Two independent rules both matter when a decode layer is captured in a HIP graph; mis-
+applying either one costs 15-25 μs per layer.
 
-> At each fork point, the branch whose first kernel is captured FIRST stays on the same
-> physical stream as the predecessor (e.g. `phys 0`). The later-captured branch gets a
-> new physical stream (`phys 4/5/8/…`).
+### Rule 1 — dispatch-order picks the physical stream
 
-Both `alt_stream.wait_stream(cur)` and explicit `record_event`/`wait_event` pairs behave
+The replay scheduler decides which physical stream each branch lands on based on **capture
+(dispatch) order during graph capture**, not on which `torch.cuda.Stream` object you passed.
+
+> At each fork point, the branch whose first kernel is captured FIRST keeps the current
+> physical stream (e.g. `phys 0`). The later-captured branch is moved to a fresh physical
+> stream (`phys 4/5/8/…`).
+
+`alt_stream.wait_stream(cur)` and explicit `record_event`/`wait_event` pairs behave
 identically here — the sync primitive does not influence the choice.
 
-**Symptom:** your `with torch.cuda.stream(alt):` block's kernels show up on `phys 0` in the
-trace, and kernels you dispatched on `cur` land on `phys 4/5`. Looks like a remap but isn't
-— it's the rule above.
+Symptom: kernels you wrote inside `with torch.cuda.stream(alt):` show up on `phys 0` in
+the trace while kernels dispatched on `cur` land on `phys 4`. Looks "remapped"; isn't.
 
-**Fix:** dispatch the cur-side work *before* the `with torch.cuda.stream(alt):` block so cur's
-chain is captured first.
+Fix: dispatch the cur-side chain *before* the `with torch.cuda.stream(alt):` block.
+
+### Rule 2 — `wait_stream` position decides when alt starts running
+
+`alt_stream.wait_stream(cur)` records a CUDA event at `cur`'s **current** state. Anything
+dispatched on `alt` afterwards waits only for that snapshot of `cur`, not for future cur
+ops.  So if you place the `wait_stream` call AFTER a heavy `cur` kernel that alt does not
+actually need (e.g. `q_b_proj`), alt is delayed for that kernel's duration even though
+there is no real data dependency.
+
+Symptom in trace: `phys_aux` is idle for 15-20 μs after phase1 ends, even though alt work
+only needs phase1's outputs. Net result: alt finishes later, attn starts later, whole
+iteration is slower.
+
+Fix: place `wait_stream` BEFORE any cur kernel alt doesn't actually need.
+
+### Combined "clean + fast" pattern (GLM-5 NSA decode)
 
 ```python
-# BAD — alt captured first, indexer steals phys 0
-alt_stream.wait_stream(cur)
-with torch.cuda.stream(alt_stream):
-    topk_ids = indexer(...)        # 1st dispatch → phys 0 (not what you want)
-kv_normed = rms_norm(...)          # 2nd dispatch → phys 4
-q_all = gap_fill(...)
-cur.wait_stream(alt_stream)
+cur = torch.cuda.current_stream()
+h_normed, _, q_lat, kv_lat, h_fp8, h_scale = phase1_pre_attention(...)
 
-# GOOD — cur captured first, stays on phys 0
-alt_stream.wait_stream(cur)
-kv_normed = rms_norm(...)          # 1st dispatch → phys 0 ✓
-q_all = gap_fill(...)
+alt_stream.wait_stream(cur)        # (Rule 2) BEFORE q_b_proj — alt only waits for phase1
+
+q, q_lora = phase2_current(q_lat)  # (Rule 1) dispatched first on cur → cur stays on phys 0
+
+# Gap-fill on cur, still before the with-stream(alt) block, so cur chain is captured first.
+kv_normed = aiter_rms_norm(kv_lat, ...)
+q_all = phase3_pre_wait(q, kv_normed, ..., kv_cache)
+
 with torch.cuda.stream(alt_stream):
-    topk_ids = indexer(...)        # 2nd dispatch → phys 4 ✓
+    topk_ids = indexer(h_normed, h_fp8, h_scale, q_lora, ...)  # dispatched last → phys 4
+
 cur.wait_stream(alt_stream)
+attn_out = phase3_post_wait(q_all, ..., topk_ids)
 ```
 
-Confirmed on MI355X with `tools/glm5_proposalA_v3_test.py`. The "bad" layout can actually be
-~5 μs *faster* (HIP packs more serial work on phys 0), but traces are unreadable. Prefer the
-"good" layout for analysis; drop to "bad" only if you are chasing every last μs and know
-what you are reading.
+Why this works: `q_lora` is actually `q_lat` (phase2_current returns the pre-gemm tensor,
+not `q`), so the indexer's first kernel (`wq_b`) only needs phase1's output. Placing
+`wait_stream` before `phase2_current` lets alt start its indexer chain the instant phase1
+completes, in parallel with cur's q_b_proj + gap-fill.
+
+### Measured on MI355X (GLM-5-FP8 TP=8 M=1, median of 3 × 100-iter runs)
+
+Results from `tools/glm5_proposalA_v3_test.py`:
+
+| Variant | μs/layer | Δ vs base | notes |
+|---|---|---|---|
+| Baseline | 299.8 | — | 1-branch fork, no gap-fill |
+| A_v2 (alt dispatched first) | 289.3 | −10.5 | layout wrong, parallelism OK |
+| A_v3 (gap-fill first, wait_stream late) | 294.0 | −5.8 | clean layout, alt delayed |
+| A_v3e (events) | 292.8 | −7.1 | same as A_v3 |
+| **A_v4 (both rules applied)** | **280.9** | **−18.9 (−6.3%)** | **clean layout + alt on time** |
+
+Sanity check via traces: alt-stream first-kernel start time — Baseline `t=50.7`, A_v3
+`t=71.0` (late), A_v4 `t=50.0` (on time).
 
 ---
 
