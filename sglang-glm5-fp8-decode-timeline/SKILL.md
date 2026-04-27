@@ -1,10 +1,11 @@
 ---
-name: sglang-decode-layer-timeline
+name: sglang-glm5-fp8-decode-timeline
 description: >-
-  Build interactive decode-layer kernel timeline HTML from GPU trace CSVs and
-  SGLang source code. Use when the user provides per-stream kernel CSVs
-  (MI355X, B200, or other GPUs) and wants an architecture diagram + multi-stream
-  timeline visualization for any model running through SGLang's decode path.
+  Build interactive decode-layer kernel timeline HTML for GLM-5-FP8 running
+  through SGLang. Use when the user provides per-stream kernel CSVs (MI355X,
+  B200, or other GPUs) for GLM-5-FP8 and wants an architecture diagram +
+  multi-stream timeline visualization (MLA + NSA sparse attention + dual-stream
+  MoE).
 ---
 
 # Build Decode Layer Timeline Visualization
