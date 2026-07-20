@@ -15,6 +15,9 @@ description: >-
 top-k kernels on only *some* layers is EXPECTED — do not flag it as an
 attribution bug in the trace or in `analyze_trace.py`.
 
+Decode dataflow diagram (inputs + what's skipped at kv≤2048): see
+[indexer-flow.md](indexer-flow.md).
+
 ## Config facts (GLM-5.2-MXFP4, `config.json`)
 
 - `num_hidden_layers = 78`
