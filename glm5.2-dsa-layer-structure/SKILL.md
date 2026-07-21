@@ -1,5 +1,5 @@
 ---
-name: glm5-dsa-layer-structure
+name: glm5.2-dsa-layer-structure
 description: >-
   GLM-5.2 / GLM-5 DSA (DeepSeek Sparse Attention) decoder-layer structure and
   the shared/full indexer-topk pattern. Use when analyzing GLM-5.2 (or GLM-5 DSA)
@@ -71,6 +71,47 @@ Do not confuse the structural full/shared split with the runtime skip in
 - Net: at i1k a *full* layer's indexer drops from ~94µs to ~31µs; the remaining
   ~31µs is KV prep (proj + LayerNorm + RoPE + Hadamard + `indexer_k_quant_and_cache`
   + select-all `topk_transform`) which must still run to maintain the KV cache.
+
+## PD disaggregation (1P1D) vs aggregated TP4 — decode latency wins, throughput halves
+
+Experiment on MI355X (GLM-5.2-MXFP4, docker `v0.5.15.post1-rocm720-mi35x-20260714`),
+identical workload `in=8192, out=1024, conc=64, num_prompts=320`, random-range-ratio 0.8.
+
+- **Baseline (before)**: aggregated TP4 on GPU 0-3 (prefill+decode share the same GPUs).
+- **1P1D (after)**: prefill server TP2 on GPU 0-1 + decode server TP2 on GPU 2-3,
+  KV transfer via `mooncake_tcp`, `--dsa-prefill-backend triton --dsa-decode-backend triton`
+  (`pd_1p1d.sh`).
+
+Median latency (the metric asked for), before → after:
+
+| Median | Aggregated TP4 (before) | 1P1D (after) | Δ |
+|---|---|---|---|
+| TTFT | 503.9 ms | 0.0 ms* | *median unreliable — see note |
+| TPOT | 53.49 ms | 38.07 ms | **−28.8%** (decode faster) |
+| ITL  | 27.54 ms | 17.66 ms | **−35.9%** (decode faster) |
+
+Throughput / tail, before → after:
+
+| | Aggregated TP4 | 1P1D | Δ |
+|---|---|---|---|
+| Request throughput | 1.24 req/s | 0.67 req/s | **−46%** |
+| Output token throughput | 1138 tok/s | 619 tok/s | −46% |
+| Mean TTFT | 3060 ms | 34063 ms | ~11× worse |
+| P99 TTFT | 23901 ms | 259908 ms | ~11× worse |
+
+**Takeaways:**
+- Separating decode onto its own TP2 pair removes prefill↔decode contention on the
+  decode GPUs → **median TPOT −29% and median ITL −36%** (decode is no longer
+  preempted by the prefill-first scheduler; see the aggregated case where prefill
+  runs back-to-back and starves decode).
+- But with only **one TP2 prefill pair**, prefill becomes the bottleneck: TTFT
+  balloons (Mean 3s → 34s, P99 24s → 260s) and **throughput halves** (1P prefill
+  capacity < aggregated TP4). 1P1D trades throughput for decode-latency smoothness.
+- \*The 1P1D **Median TTFT = 0.00 ms is a measurement artifact** of the PD/router
+  streaming path (first-token timestamp), not a real 0. Use Mean/P90/P99 TTFT for
+  the true (much worse) prefill latency.
+- To keep decode-latency gains *without* losing throughput you need ≥2 prefill
+  servers (e.g. 2P1D or multi-node), so prefill capacity matches aggregated TP4.
 
 ## Quick check
 
