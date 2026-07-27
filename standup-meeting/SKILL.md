@@ -24,6 +24,7 @@ Today:
 
 ## Rules
 
+- Write the entire standup in English only, regardless of the language used in the conversation or source material. Translate any non-English notes into English.
 - Group every item under a ticket ID (e.g. `GPUAI-6363`) followed by the project/topic.
 - `Last day:` lists what was worked on previously, with a short result/outcome line per item.
 - `Today:` lists what is planned next.
