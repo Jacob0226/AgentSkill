@@ -129,9 +129,10 @@ For ROCm HIP stream/event/graph programming model, see [rocm-streams.md](rocm-st
 
 | Script | Purpose |
 |--------|---------|
-| `trace_analysis/sglang/analyze_trace.py` | **Main analysis**: 3-step trace analysis (kernel stats → layer structure → per-call-site breakdown). Always pass `--forward-match`. |
-| `trace_analysis/compare/compare_layer_breakdown.py` | Compare two step3 workbooks side-by-side (e.g. MI355X vs B200) |
-| `trace_analysis/atom/analyze_atom_trace.py` | Same step3 schema for an ATOM trace (SGLang vs ATOM flow) |
+| `trace_analysis/analyze_sglang_trace.py` | **Main analysis**: 3-step trace analysis (kernel stats → layer structure → per-call-site breakdown). Always pass `--forward-match`. |
+| `trace_analysis/compare/side_by_side.py` | Put step3 workbooks side by side: `--align lcs` row-aligns two SGLang runs (MI355X vs B200), `--align none` keeps each side's own call order (SGLang vs ATOM) |
+| `trace_analysis/compare/glm52_buckets.py` | Both sides' kernels in ~9 GLM-5.2 functional buckets, from the same step3 workbooks |
+| `trace_analysis/analyze_atom_trace.py` | Same step3 schema for an ATOM trace (SGLang vs ATOM flow) |
 | `trace_analysis/diagnostics/` | `verify_step3_against_trace.py`, `window_kernel_diff.py`, `comm_skew_split.py`, `trace_kernel_summary.py`, `extract_stream.py`, `analyze_trace_overlap.py` |
 | `parse_perf_metrics_to_csv.py` | Parse `sglang.bench_serving` result blocks → CSV |
 
@@ -142,16 +143,16 @@ For ROCm HIP stream/event/graph programming model, see [rocm-streams.md](rocm-st
 python3 ~/SGLang-benchmarks/parse_perf_metrics_to_csv.py --root-dir <results_dir>
 
 # 2. Full trace analysis (graph-on + graph-off)
-python3 ~/SGLang-benchmarks/trace_analysis/sglang/analyze_trace.py \
+python3 ~/SGLang-benchmarks/trace_analysis/analyze_sglang_trace.py \
     --graph-on <graph-on-trace.json.gz> \
     --graph-off <graph-off-trace.json.gz> \
     --forward-match "DECODE bs=64"
 
 # 3. Compare MI355X vs B200
-python3 ~/SGLang-benchmarks/trace_analysis/compare/compare_layer_breakdown.py \
-    --file-a MI355X/step3_layer_breakdown.xlsx \
-    --file-b B200/step3_layer_breakdown.xlsx \
-    --labels MI355X B200 --out comparison.xlsx
+python3 ~/SGLang-benchmarks/trace_analysis/compare/side_by_side.py --align lcs \
+    --src MI355X MI355X/step3_layer_breakdown.xlsx \
+    --src B200   B200/step3_layer_breakdown.xlsx \
+    --out comparison.xlsx
 ```
 
 ---
