@@ -7,8 +7,9 @@ schema and the two comparison flows — read it before changing an analyzer.
 ```
 trace_analysis/sglang/       analyze_trace.py                 (the core)
 trace_analysis/atom/         analyze_atom_trace.py
-trace_analysis/compare/      compare_breakdown.py, callorder_sidebyside.py,
-                             compare_glm52_sglang_atom.py,
+trace_analysis/compare/      compare_step3.py         (two SGLang runs)
+                             sglang_vs_atom_glm52.py  (SGLang vs ATOM, buckets)
+                             callorder_sidebyside.py  (SGLang vs ATOM, call order)
                              glm52_full_layer_sidebyside.py
 trace_analysis/diagnostics/  verify_step3_against_trace.py, window_kernel_diff.py,
                              comm_skew_split.py, trace_kernel_summary.py,
@@ -54,21 +55,22 @@ comparing the two.
 
 ---
 
-## compare/compare_breakdown.py
+## compare/compare_step3.py
 
-Compare two step3 workbooks side by side (e.g. MI355X vs B200).
+Compare any two step3 workbooks side by side — two GPUs (MI355X vs B200) or the same
+GPU before and after a change.
 
 ```bash
-python3 trace_analysis/compare/compare_breakdown.py \
+python3 trace_analysis/compare/compare_step3.py \
     --file-a MI355X/step3_layer_breakdown.xlsx \
     --file-b B200/step3_layer_breakdown.xlsx \
     --labels MI355X B200 \
     --out comparison.xlsx
 ```
 
-Uses LCS alignment to match (ParentModule, LeafModule) pairs across platforms. For
-SGLang vs ATOM this alignment does not work (different module names) — use the
-`atom/` + `callorder_sidebyside.py` flow instead.
+Uses LCS alignment to match (ParentModule, LeafModule) pairs, so both sides must use
+the same module names. For SGLang vs ATOM they do not — use `sglang_vs_atom_glm52.py`
+(functional buckets) plus `callorder_sidebyside.py` (call order) instead.
 
 ---
 
