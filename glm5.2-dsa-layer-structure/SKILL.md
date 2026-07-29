@@ -1,12 +1,14 @@
 ---
 name: glm5.2-dsa-layer-structure
 description: >-
-  GLM-5.2 / GLM-5 DSA (DeepSeek Sparse Attention) decoder-layer structure and
-  the shared/full indexer-topk pattern. Use when analyzing GLM-5.2 (or GLM-5 DSA)
-  decode/prefill profiler traces — especially with analyze_trace.py /
-  compare_breakdown.py — and a layer or layer-type appears to be "missing" the
-  DSA indexer / sparse-attention kernels. Explains why the indexer top-k does NOT
-  run on every layer so you don't misreport it as a bug or attribution error.
+  GLM-5.2 / GLM-5 DSA (DeepSeek Sparse Attention) decoder-layer structure: the
+  three layer types (full-indexer + MLP, full-indexer + MoE, shared-indexer + MoE),
+  which layer indices each covers, and per-type flow diagrams. Use when analyzing
+  GLM-5.2 (or GLM-5 DSA) decode/prefill profiler traces — especially with
+  analyze_trace.py / compare_breakdown.py — when asked how many layer types the
+  model has, or when a layer appears to be "missing" the DSA indexer /
+  sparse-attention kernels. Explains why the indexer top-k runs on only 21 of 78
+  layers so you don't misreport it as a bug or attribution error.
 ---
 
 # GLM-5.2 / GLM-5 DSA layer structure
@@ -15,15 +17,27 @@ description: >-
 top-k kernels on only *some* layers is EXPECTED — do not flag it as an
 attribution bug in the trace or in `analyze_trace.py`.
 
-Decode dataflow diagram (inputs + what's skipped at kv≤2048): see
+GLM-5.2 has exactly **three** decoder-layer types:
+
+| layer type | layers | count |
+|---|---|---|
+| **full-indexer + MLP** | 0, 1, 2 | 3 |
+| **full-indexer + MoE** | 6, 10, 14, …, 74 | 18 |
+| **shared-indexer + MoE** | 3-5, 7-9, …, 75-77 | 57 |
+
+Per-type flow diagrams, measured per-layer costs, and what the two boundary layers
+(first / last of the stack) do differently: [layer-flow.md](layer-flow.md).
+Decode dataflow of the indexer itself (inputs + what's skipped at kv≤2048):
 [indexer-flow.md](indexer-flow.md).
 
 ## Config facts (GLM-5.2-MXFP4, `config.json`)
 
 - `num_hidden_layers = 78`
 - `first_k_dense_replace = 3` → **3 dense layers** (`DeepseekV2MLP`) + **75 MoE
-  layers** (`DeepseekV2MoE`). This is what `analyze_trace.py` reports as its two
-  layer types (A = dense, B = MoE).
+  layers** (`DeepseekV2MoE`). Inherited from DeepSeek-V3, which likewise keeps its
+  first 3 FFNs dense; the V3 report only states the choice, and the usual rationale
+  is that the earliest representations are barely differentiated, so routing there
+  is close to random and destabilises the router.
 - `index_topk = 2048` (sparse-attention top-k budget)
 - `index_topk_freq = 4`, `index_skip_topk_offset = 3` → the **full/shared** split.
 
@@ -34,28 +48,42 @@ With `freq=4, offset=3`:
 
 ```
 skips_topk(layer_id) = max(layer_id - offset + 1, 0) % freq != 0
-                     = (layer_id - 2) % 4 != 0
+                     = max(layer_id - 2, 0) % 4 != 0
 ```
 
-- **Full layer** (computes fresh top-k): `layer_id ∈ {2, 6, 10, 14, ...}` (~1 in 4).
-- **Shared layer** (reuses previous layer's top-k, skips the top-k selection):
-  the other ~3/4 of layers.
+- **Full layer** (computes fresh top-k): `layer_id ∈ {0, 1, 2, 6, 10, …, 74}` —
+  **21 of 78**. The `max(…, 0)` clamp is easy to miss: layers 0 and 1 are full too,
+  which is why all three dense layers are full-indexer layers.
+- **Shared layer**: the other **57**. They run **no indexer kernels at all** — not
+  even the K-cache write — and gather with the index list the previous full layer
+  produced.
 
-So the expensive sparse-selection kernels — `paged_mqa_logits`, the logits GEMM
-(`Cijk...`), and the real `topk_transform_decode` — run on **only ~1/4 of
-layers**. (Every layer still instantiates an Indexer slot, but shared layers do
-not recompute the selection.)
+Confirmed on trace: an i8k prefill forward contains exactly 21 `topk_transform`,
+`fp8_mqa_logits`, `hadamard_quant` and `indexer_k_quant_and_cache` launches, and 21
+of each Indexer GEMM.
 
 ## Implication for analyze_trace.py / compare_breakdown.py
 
-- `analyze_trace.py` groups decoder layers into 2 types by sub-module signature
-  (dense vs MoE) and samples **ONE representative instance per type** for the
-  kernel breakdown. That sample can be a *full* or a *shared* layer, so a layer
-  type showing **0 (or few) indexer kernels is expected**, not a missing-kernel
-  bug.
-- Therefore the per-type attention Σduration differs by whether the sampled
-  instance was full vs shared. When estimating a full 78-layer forward, remember
-  the indexer-topk cost applies to only ~1/4 of layers, not all 75 MoE layers.
+Both live under `~/SGLang-benchmarks/trace_analysis/` (`sglang/analyze_trace.py`,
+`compare/compare_breakdown.py`); that folder's README documents the step3 schema.
+
+- `analyze_trace.py` step3 groups layers by **the kernels they actually run** and
+  aggregates each call site over all 78 layers, so `LaunchCount` (`LaunchCnt` in the
+  side-by-side workbooks) is measured, not extrapolated: the indexer rows show 21,
+  not 3. (Before Jul 2026 it sampled ONE representative layer per
+  sub-module signature, which merged full and shared MoE layers and undercounted the
+  indexer chain by 18 layers — 10.7 ms, 1.5% of a prefill forward.)
+- The `LayerType` column lists which types reach a call site as tags — `full+MLP`,
+  `full+MoE`, `shared+MoE`, or `all` — so the indexer rows read
+  "full+MLP, full+MoE" with `LaunchCount = 21`; the workbook's **LayerTypes** sheet
+  spells the tags out with their layer indices.
+- When estimating a forward by hand, apply the indexer cost to **21 layers**, not to
+  all 78 or all 75 MoE layers.
+- Two count columns, do not mix them up: `LaunchCnt` belongs to the row (launches of
+  that one call site, so `Σ_ms = Avg_us × LaunchCnt`), while `KernelCnt`/`KernelΣ_ms`
+  belong to the kernel **name** across the whole forward and are repeated on every row
+  sharing the name — never sum them. `KernelCnt` above the summed `LaunchCnt` of those
+  rows means the kernel also runs outside the 78 decoder layers (lm_head, sampling).
 
 ## Second, independent skip: runtime logits skip (PR31324)
 
