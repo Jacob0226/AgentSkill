@@ -7,7 +7,7 @@ schema and the two comparison flows — read it before changing an analyzer.
 ```
 trace_analysis/sglang/       analyze_trace.py                 (the core)
 trace_analysis/atom/         analyze_atom_trace.py
-trace_analysis/compare/      compare_step3.py         (two SGLang runs)
+trace_analysis/compare/      compare_layer_breakdown.py         (two SGLang runs)
                              sglang_vs_atom_glm52.py  (SGLang vs ATOM, buckets)
                              callorder_sidebyside.py  (SGLang vs ATOM, call order)
                              glm52_full_layer_sidebyside.py
@@ -55,13 +55,13 @@ comparing the two.
 
 ---
 
-## compare/compare_step3.py
+## compare/compare_layer_breakdown.py
 
 Compare any two step3 workbooks side by side — two GPUs (MI355X vs B200) or the same
 GPU before and after a change.
 
 ```bash
-python3 trace_analysis/compare/compare_step3.py \
+python3 trace_analysis/compare/compare_layer_breakdown.py \
     --file-a MI355X/step3_layer_breakdown.xlsx \
     --file-b B200/step3_layer_breakdown.xlsx \
     --labels MI355X B200 \
