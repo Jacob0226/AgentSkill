@@ -18,7 +18,8 @@ description: >-
 | Host (edit here) | `~/PR/sglang` | Fork: `Jacob0226/sglang`. Make all code changes here. |
 | Container (run here) | `~/work-space/sglang` | Checkout the branch from the fork, then run server/benchmarks. |
 | Benchmarks | `~/SGLang-benchmarks/` | Benchmark scripts, profiler parsers, analysis tools. |
-| Reusable helper scripts | `~/SGLang-benchmarks/tools/` | **All Python / HTML tools and unit tests go here** (e.g. `glm5_decode_layer.py`, `glm5_proposalA_v3_test.py`, `glm5_proposalA_overlap_analysis.py`, `analyze_trace_overlap.py`, `mi355x_decode_layer_timeline.html`). |
+| Reusable helper scripts | `~/SGLang-benchmarks/tools/` | **Micro-benchmarks, stream/graph tests, env setup go here** (e.g. `glm5_decode_layer.py`, `glm5_proposalA_v3_test.py`, `glm5_proposalA_overlap_analysis.py`, `mi355x_decode_layer_timeline.html`). |
+| Trace analysis | `~/SGLang-benchmarks/trace_analysis/` | **Anything reading a profiler trace goes here**: `sglang/` + `atom/` analyzers, `compare/` workbooks, `diagnostics/`. See its README. |
 | Scratch / ad-hoc outputs | `~/SGLang-benchmarks/tmp/` | **Outputs only** — trace dumps, one-off HTMLs produced by tool runs, temporary CSVs. Do NOT put executable helper scripts here; any new script should live under `tools/`. Same host↔container path (`/home/jacchang/SGLang-benchmarks/tmp/` is mounted into the container). |
 
 ### Edit → Run Cycle
@@ -121,17 +122,18 @@ Script: `~/SGLang-benchmarks/GLM.sh`
 
 ## Analysis Tools
 
-All scripts live in `~/SGLang-benchmarks/`. For detailed usage see [analysis-tools.md](analysis-tools.md).
+Paths are relative to `~/SGLang-benchmarks/`. For detailed usage see
+[analysis-tools.md](analysis-tools.md), and `trace_analysis/README.md` in the repo for
+the step3 workbook schema and the two comparison flows.
 For ROCm HIP stream/event/graph programming model, see [rocm-streams.md](rocm-streams.md).
 
 | Script | Purpose |
 |--------|---------|
-| `analyze_trace.py` | **Main analysis**: 3-step trace analysis (kernel stats → layer structure → per-layer breakdown) |
-| `compare_breakdown.py` | Compare two breakdown CSVs side-by-side (e.g. MI355X vs B200) |
-| `parse_bench.py` | Parse benchmark logs → summary CSV (E2E, TTFT, ITL latencies) |
+| `trace_analysis/sglang/analyze_trace.py` | **Main analysis**: 3-step trace analysis (kernel stats → layer structure → per-call-site breakdown). Always pass `--forward-match`. |
+| `trace_analysis/compare/compare_breakdown.py` | Compare two step3 workbooks side-by-side (e.g. MI355X vs B200) |
+| `trace_analysis/atom/analyze_atom_trace.py` | Same step3 schema for an ATOM trace (SGLang vs ATOM flow) |
+| `trace_analysis/diagnostics/` | `verify_step3_against_trace.py`, `window_kernel_diff.py`, `comm_skew_split.py`, `trace_kernel_summary.py`, `extract_stream.py`, `analyze_trace_overlap.py` |
 | `parse_perf_metrics_to_csv.py` | Parse `sglang.bench_serving` result blocks → CSV |
-| `parse_torch_profiler.py` | Streaming parse of large `.trace.json.gz` → kernel CSV |
-| `fetch_kernels_from_torch_profiler.py` | Fetch kernels by timestamp range from trace |
 
 ### Quick Analysis Workflow
 
@@ -140,12 +142,13 @@ For ROCm HIP stream/event/graph programming model, see [rocm-streams.md](rocm-st
 python3 ~/SGLang-benchmarks/parse_perf_metrics_to_csv.py --root-dir <results_dir>
 
 # 2. Full trace analysis (graph-on + graph-off)
-python3 ~/SGLang-benchmarks/analyze_trace.py \
+python3 ~/SGLang-benchmarks/trace_analysis/sglang/analyze_trace.py \
     --graph-on <graph-on-trace.json.gz> \
-    --graph-off <graph-off-trace.json.gz>
+    --graph-off <graph-off-trace.json.gz> \
+    --forward-match "DECODE bs=64"
 
 # 3. Compare MI355X vs B200
-python3 ~/SGLang-benchmarks/compare_breakdown.py \
+python3 ~/SGLang-benchmarks/trace_analysis/compare/compare_breakdown.py \
     --file-a MI355X/step3_layer_breakdown.xlsx \
     --file-b B200/step3_layer_breakdown.xlsx \
     --labels MI355X B200 --out comparison.xlsx

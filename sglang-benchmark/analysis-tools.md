@@ -1,54 +1,103 @@
 # Analysis Tools Reference
 
-All scripts are in `~/SGLang-benchmarks/`.
+Trace tooling lives in `~/SGLang-benchmarks/trace_analysis/`; run it from the
+`~/SGLang-benchmarks/` root. That folder's own README documents the step3 workbook
+schema and the two comparison flows — read it before changing an analyzer.
 
-## analyze_trace.py (Main Analysis)
+```
+trace_analysis/sglang/       analyze_trace.py                 (the core)
+trace_analysis/atom/         analyze_atom_trace.py
+trace_analysis/compare/      compare_breakdown.py, callorder_sidebyside.py,
+                             compare_glm52_sglang_atom.py, compare_mla.py,
+                             atom_sglang_layer_sidebyside.py,
+                             glm52_full_layer_sidebyside.py
+trace_analysis/diagnostics/  verify_step3_against_trace.py, window_kernel_diff.py,
+                             comm_skew_split.py, trace_kernel_summary.py,
+                             extract_stream.py, analyze_trace_overlap.py
+trace_analysis/regen_glm52_sidebyside.sh    driver for the whole SGLang-vs-ATOM set
+```
 
-Three-step trace analysis combining cuda-graph-ON and OFF traces.
+## sglang/analyze_trace.py (Main Analysis)
+
+Three-step analysis combining the cuda-graph-**ON** trace (real timing) with the
+cuda-graph-**OFF** trace (the only one carrying the `nn.Module` tree).
 
 ```bash
-# Full analysis (both traces)
-python3 analyze_trace.py --graph-on on.trace.json.gz --graph-off off.trace.json.gz
+# Full analysis, restricted to ONE forward pass (always do this)
+python3 trace_analysis/sglang/analyze_trace.py \
+    --graph-on on.trace.json.gz --graph-off off.trace.json.gz \
+    --forward-match "DECODE bs=64" --out DIR --tag _MI355X
 
-# Step 1 only: kernel statistics from graph-on trace
-python3 analyze_trace.py --graph-on on.trace.json.gz
+# Step 1 only: kernel statistics from the graph-on trace
+python3 trace_analysis/sglang/analyze_trace.py --graph-on on.trace.json.gz
 
-# Step 2 only: layer structure from graph-off trace
-python3 analyze_trace.py --graph-off off.trace.json.gz
+# Step 2 only: layer structure from the graph-off trace
+python3 trace_analysis/sglang/analyze_trace.py --graph-off off.trace.json.gz
 
 # Export step 1 to CSV
-python3 analyze_trace.py --graph-on on.trace.json.gz --csv kernels.csv
-
-# Add tag to output files
-python3 analyze_trace.py --graph-on on.trace.json.gz --graph-off off.trace.json.gz --tag MI355X
+python3 trace_analysis/sglang/analyze_trace.py --graph-on on.trace.json.gz --csv kernels.csv
 ```
 
 **Steps**:
-1. **Step 1** (graph-on): Parse kernel stats — count, total duration, avg, percentage
-2. **Step 2** (graph-off): Parse layer structure — module types, sub-modules, execution order
-3. **Step 3** (combined): Per-layer kernel breakdown with sub-module labels
+1. **Step 1** (graph-on): per kernel NAME — count, Σ, avg, % of the forward
+2. **Step 2** (graph-off): layer structure — module classes, sub-modules, call order
+3. **Step 3** (combined): one row per **call site**, aggregated over all layers
 
-**Output**: CSV/XLSX files with kernel breakdown per layer.
+Without `--forward-match` every kernel is averaged over the whole trace, mixing
+different batch/token sizes — that once turned an 861 µs all-reduce into 713 µs.
+
+Key step3 columns: `LayerType` (which layer types reach the call site; the
+**LayerTypes** sheet decodes the tags), `LaunchCount` (launches of that call site in
+the forward — one per layer on the SGLang side), and `KernelCount_fwd` /
+`KernelSum_ms_fwd` (the kernel NAME's totals in the forward, repeated on every row
+sharing the name — never sum them). The tail of the run prints a coverage report
+comparing the two.
 
 ---
 
-## compare_breakdown.py
+## compare/compare_breakdown.py
 
-Compare two `step3_layer_breakdown` files side by side (e.g. MI355X vs B200).
+Compare two step3 workbooks side by side (e.g. MI355X vs B200).
 
 ```bash
-python3 compare_breakdown.py \
+python3 trace_analysis/compare/compare_breakdown.py \
     --file-a MI355X/step3_layer_breakdown.xlsx \
     --file-b B200/step3_layer_breakdown.xlsx \
     --labels MI355X B200 \
     --out comparison.xlsx
 ```
 
-Uses LCS alignment to match (ParentModule, LeafModule) pairs across platforms.
+Uses LCS alignment to match (ParentModule, LeafModule) pairs across platforms. For
+SGLang vs ATOM this alignment does not work (different module names) — use the
+`atom/` + `callorder_sidebyside.py` flow instead.
 
 ---
 
-## parse_perf_metrics_to_csv.py
+## diagnostics/
+
+```bash
+# Does a step3 workbook actually match the trace? (run after touching an analyzer)
+python3 trace_analysis/diagnostics/verify_step3_against_trace.py \
+    --step3 step3_layer_breakdown_SGLANG.xlsx --trace on.trace.json.gz \
+    --forward-match "bs=3"
+
+# Which kernels differ between two windows (two ranks, or two stacks)?
+python3 trace_analysis/diagnostics/window_kernel_diff.py --stats --show-args ...
+
+# Is a slow all-reduce real comm or waiting for the slowest rank? (needs all TP ranks)
+python3 trace_analysis/diagnostics/comm_skew_split.py ...
+
+# Quick per-kernel totals of one trace, no structure needed
+python3 trace_analysis/diagnostics/trace_kernel_summary.py trace.json.gz
+
+# Per-stream inspection / stream concurrency and bubble time
+python3 trace_analysis/diagnostics/extract_stream.py trace.json.gz --list-streams
+python3 trace_analysis/diagnostics/analyze_trace_overlap.py dual.trace.json.gz single.trace.json.gz
+```
+
+---
+
+## parse_perf_metrics_to_csv.py (repo root)
 
 Parse `sglang.bench_serving` result blocks from log files into CSV.
 
@@ -58,54 +107,3 @@ python3 parse_perf_metrics_to_csv.py --root-dir <results_dir>
 
 Extracts from log filenames: `bench_in{input}_out{output}_conc{concurrency}.log`
 Parsed fields: E2E latency, TTFT, ITL, throughput, etc.
-
----
-
-## parse_bench.py
-
-Parse benchmark log directories into summary CSV with averaged latencies.
-
-```bash
-python3 parse_bench.py --root-dir ~/prof/0123_bench --output summary.csv
-```
-
-Expected directory structure: `i{N}-o{N}-n{N}-concurrency{N}/bench*.log`
-Output columns: config, E2E, TTFT, ITL (median values averaged across runs).
-
----
-
-## parse_torch_profiler.py
-
-Streaming parse of large `.trace.json.gz` files using ijson. Extracts GPU kernel statistics.
-
-```bash
-python3 parse_torch_profiler.py \
-    --file trace.json.gz \
-    --out kernels.csv
-```
-
-Output columns: Name, TotalCalls, TotalDuration_us, Ave_us, Percentage.
-Uses streaming (ijson) to handle multi-GB trace files without loading into memory.
-
----
-
-## fetch_kernels_from_torch_profiler.py
-
-Fetch GPU kernels with timestamps from a trace, optionally filtered by time range.
-
-```bash
-# All GPU kernels
-python3 fetch_kernels_from_torch_profiler.py trace.json
-
-# Filter by timestamp range
-python3 fetch_kernels_from_torch_profiler.py trace.json \
-    --start 6195887545100 --end 6195887600000
-
-# Top 20 longest kernels
-python3 fetch_kernels_from_torch_profiler.py trace.json --top 20 --sort dur
-
-# Export to CSV
-python3 fetch_kernels_from_torch_profiler.py trace.json --csv > kernels.csv
-```
-
-Options: `--start`, `--end`, `--sort {start,end,dur,name}`, `--top N`, `--csv`, `--list-all`.
