@@ -18,7 +18,7 @@ description: >-
 | Host (edit here) | `~/PR/sglang` | Fork: `Jacob0226/sglang`. Make all code changes here. |
 | Container (run here) | `~/work-space/sglang` | Checkout the branch from the fork, then run server/benchmarks. |
 | Benchmarks | `~/SGLang-benchmarks/` | Benchmark scripts, profiler parsers, analysis tools. |
-| Reusable helper scripts | `~/SGLang-benchmarks/tools/` | **Micro-benchmarks, stream/graph tests, env setup go here** (e.g. `glm5_decode_layer.py`, `glm5_proposalA_v3_test.py`, `glm5_proposalA_overlap_analysis.py`, `mi355x_decode_layer_timeline.html`). |
+| Reusable helper scripts | `~/SGLang-benchmarks/tools/` | **Micro-benchmarks, stream/graph tests, env setup go here** (e.g. `kill_sglang.sh`, `glm5_decode_layer.py`, `glm5_proposalA_v3_test.py`, `glm5_proposalA_overlap_analysis.py`, `mi355x_decode_layer_timeline.html`). |
 | Trace analysis | `~/SGLang-benchmarks/trace_analysis/` | **Anything reading a profiler trace goes here**: `sglang/` + `atom/` analyzers, `compare/` workbooks, `diagnostics/`. See its README. |
 | Scratch / ad-hoc outputs | `~/SGLang-benchmarks/tmp/` | **Outputs only** — trace dumps, one-off HTMLs produced by tool runs, temporary CSVs. Do NOT put executable helper scripts here; any new script should live under `tools/`. Same host↔container path (`/home/jacchang/SGLang-benchmarks/tmp/` is mounted into the container). |
 
@@ -33,6 +33,77 @@ description: >-
 
 - Remote: `git@github.com:Jacob0226/sglang.git`
 - Typical branches: `jacob/hip-dual-stream-glm5`, `jacob/topk-smem-optimize`, etc.
+
+---
+
+## Killing a stuck SGLang server (do NOT improvise this)
+
+**Always use `~/SGLang-benchmarks/tools/kill_sglang.sh <container> [port]`.** Every
+ad-hoc `pkill` variant has a failure mode that leaves the box unusable and makes
+the *next* run die at startup with `localhost:8234 is already in use`.
+
+```bash
+~/SGLang-benchmarks/tools/kill_sglang.sh jacchang_GLM5_0728_
+```
+
+Five independent traps, all measured on a live run (8 processes total):
+
+| Command | Processes it kills | What it misses |
+|---|---|---|
+| `pkill -f sglang.launch_server` | **1 of 8** | the 5 renamed workers + GLM.sh |
+| `pkill -9 python3` | 2 (launcher, resource_tracker) | `sglang::*` workers, GLM.sh |
+| `pkill -9 sglang` | 5 (`sglang::*` workers) | launcher, GLM.sh |
+| `pkill -9 -f "GLM[.]sh"` | 2 | the engine |
+
+1. **`pkill -f <pat>` kills its own shell.** `docker exec ... bash -c 'pkill -f
+   sglang.launch_server'` puts the pattern into the shell's own
+   `/proc/<pid>/cmdline`, so pkill matches itself and the exec dies (exit 143/137)
+   before the rest of the cleanup runs. Verified directly: a `bash -c` running
+   `pkill -f "sleep 300"` was SIGTERMed mid-script.
+   *Fix:* match on **comm** (`pkill -9 python3`, no `-f`) — the shell's comm is
+   `bash`, so it can never self-match. Where `-f` is unavoidable (GLM.sh), break
+   the literal with a bracket: `pkill -9 -f "GLM[.]sh"`.
+
+2. **SGLang renames its workers, so `-f sglang.launch_server` misses them.**
+   Only the launcher has `sglang.launch_server` in its args. setproctitle renames
+   the children to `sglang::scheduler_TP0`, `sglang::tokenizer_worker`,
+   `sglang::detokenizer`, which comm truncates to `sglang::schedul` etc. Matching
+   `python3` and `sglang` are **both** required — neither covers the other
+   (launcher comm is `python3`; worker comms contain no "python").
+
+3. **The port is held by a tokenizer_worker, not the launcher.** `pgrep -f
+   launch_server` returning nothing while `ss -ltn` still shows `:8234` is the
+   normal symptom. Always verify by polling the **port**, never the process list.
+
+4. **Cancelling `docker exec` does not kill anything inside the container.** The
+   in-container tree is reparented and keeps running — observed as an orphan
+   `GLM.sh` (ppid 0) still alive 863 s after its exec was cancelled. Worse, GLM.sh
+   has a config loop and a server-restart retry, so if you kill the engine while
+   GLM.sh survives it launches a **new** server within seconds and you play
+   whack-a-mole. **Kill GLM.sh first, engine second.**
+
+5. **Never pass the cleanup script as an argument to `bash -c`.** `docker exec c
+   bash -c "$script"` puts the whole script text — *including its comments* — into
+   the shell's cmdline, so a `pkill -9 -f "GLM[.]sh"` line self-matches on the word
+   `GLM.sh` sitting in a nearby comment. This killed the first version of
+   `kill_sglang.sh` at exit 137. Feed the script over **stdin** instead
+   (`... | docker exec -i c bash -s -- "$port"`); then the cmdline is only
+   `bash -s -- 8234` and there is nothing to match.
+
+If you must do it by hand, this is the whole recipe (note the quoting — typing it
+inline is exactly how trap 5 bites):
+
+```bash
+docker exec <container> bash -s <<'EOS'
+pkill -9 -f "GLM[.]sh"; pkill -9 -f "bench[_]serving"   # orchestrator first
+pkill -9 python3; pkill -9 sglang                       # then engine, by comm
+sleep 8; ss -ltn | grep :8234 || echo "port free"       # verify the PORT
+EOS
+```
+
+Caveat: the benchmark containers run with host networking, so the port check is
+host-wide. If `kill_sglang.sh` reports the port still held after cleaning the
+container you named, a *different* container is holding it — check `docker ps`.
 
 ---
 
