@@ -8,8 +8,7 @@ schema and the two comparison flows — read it before changing an analyzer.
 trace_analysis/sglang/       analyze_trace.py                 (the core)
 trace_analysis/atom/         analyze_atom_trace.py
 trace_analysis/compare/      compare_breakdown.py, callorder_sidebyside.py,
-                             compare_glm52_sglang_atom.py, compare_mla.py,
-                             atom_sglang_layer_sidebyside.py,
+                             compare_glm52_sglang_atom.py,
                              glm52_full_layer_sidebyside.py
 trace_analysis/diagnostics/  verify_step3_against_trace.py, window_kernel_diff.py,
                              comm_skew_split.py, trace_kernel_summary.py,
