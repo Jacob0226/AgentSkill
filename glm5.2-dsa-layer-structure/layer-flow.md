@@ -111,7 +111,7 @@ never over all 78.
 
 Grouping layers by the kernels they run yields **five** raw groups, not three, because
 the all-reduce between two layers is attributed to whichever layer the trace nests it
-in. `analyze_trace.py` merges the five back into the three types (they share a type
+in. `analyze_sglang_trace.py` merges the five back into the three types (they share a type
 name), so the workbook shows three:
 
 | raw group | layers | type | why it split off |

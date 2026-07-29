@@ -5,11 +5,11 @@ Trace tooling lives in `~/SGLang-benchmarks/trace_analysis/`; run it from the
 schema and the two comparison flows — read it before changing an analyzer.
 
 ```
-trace_analysis/sglang/       analyze_trace.py                 (the core)
-trace_analysis/atom/         analyze_atom_trace.py
-trace_analysis/compare/      compare_layer_breakdown.py         (two SGLang runs)
-                             sglang_vs_atom_glm52.py  (SGLang vs ATOM, buckets)
-                             callorder_sidebyside.py  (SGLang vs ATOM, call order)
+trace_analysis/analyze_sglang_trace.py      the core; only this and the next read raw traces
+trace_analysis/analyze_atom_trace.py        same step3 schema for an ATOM trace
+trace_analysis/compare/      side_by_side.py    --align lcs  = two SGLang runs, row-aligned
+                                                --align none = SGLang vs ATOM, call order
+                             glm52_buckets.py   ~9 GLM-5.2 functional buckets (+ the rules)
                              glm52_full_layer_sidebyside.py
 trace_analysis/diagnostics/  verify_step3_against_trace.py, window_kernel_diff.py,
                              comm_skew_split.py, trace_kernel_summary.py,
@@ -17,25 +17,29 @@ trace_analysis/diagnostics/  verify_step3_against_trace.py, window_kernel_diff.p
 trace_analysis/regen_glm52_sidebyside.sh    driver for the whole SGLang-vs-ATOM set
 ```
 
-## sglang/analyze_trace.py (Main Analysis)
+Everything under `compare/` consumes the analyzers' workbooks, never a raw trace, so
+there is one forward-segmentation implementation per stack and no comparison can
+disagree with the analyzer about which forward it describes.
+
+## analyze_sglang_trace.py (Main Analysis)
 
 Three-step analysis combining the cuda-graph-**ON** trace (real timing) with the
 cuda-graph-**OFF** trace (the only one carrying the `nn.Module` tree).
 
 ```bash
 # Full analysis, restricted to ONE forward pass (always do this)
-python3 trace_analysis/sglang/analyze_trace.py \
+python3 trace_analysis/analyze_sglang_trace.py \
     --graph-on on.trace.json.gz --graph-off off.trace.json.gz \
     --forward-match "DECODE bs=64" --out DIR --tag _MI355X
 
 # Step 1 only: kernel statistics from the graph-on trace
-python3 trace_analysis/sglang/analyze_trace.py --graph-on on.trace.json.gz
+python3 trace_analysis/analyze_sglang_trace.py --graph-on on.trace.json.gz
 
 # Step 2 only: layer structure from the graph-off trace
-python3 trace_analysis/sglang/analyze_trace.py --graph-off off.trace.json.gz
+python3 trace_analysis/analyze_sglang_trace.py --graph-off off.trace.json.gz
 
 # Export step 1 to CSV
-python3 trace_analysis/sglang/analyze_trace.py --graph-on on.trace.json.gz --csv kernels.csv
+python3 trace_analysis/analyze_sglang_trace.py --graph-on on.trace.json.gz --csv kernels.csv
 ```
 
 **Steps**:
@@ -55,22 +59,41 @@ comparing the two.
 
 ---
 
-## compare/compare_layer_breakdown.py
+## compare/side_by_side.py
 
-Compare any two step3 workbooks side by side — two GPUs (MI355X vs B200) or the same
-GPU before and after a change.
+`--align lcs`: compare two step3 workbooks row by row — two GPUs (MI355X vs B200) or
+the same GPU before and after a change. LCS-matches (ParentModule, LeafModule) pairs,
+so both sides must use the same module names.
 
 ```bash
-python3 trace_analysis/compare/compare_layer_breakdown.py \
-    --file-a MI355X/step3_layer_breakdown.xlsx \
-    --file-b B200/step3_layer_breakdown.xlsx \
-    --labels MI355X B200 \
+python3 trace_analysis/compare/side_by_side.py --align lcs \
+    --src MI355X MI355X/step3_layer_breakdown.xlsx \
+    --src B200   B200/step3_layer_breakdown.xlsx \
     --out comparison.xlsx
 ```
 
-Uses LCS alignment to match (ParentModule, LeafModule) pairs, so both sides must use
-the same module names. For SGLang vs ATOM they do not — use `sglang_vs_atom_glm52.py`
-(functional buckets) plus `callorder_sidebyside.py` (call order) instead.
+`--align none` (default): keep each source in its own call order, any number of
+sources. This is the SGLang-vs-ATOM mode — the module names do not correspond there,
+so LCS would invent pairings. Every row still carries its caller and call site, and a
+bucket summary is appended (`--summary-csv` embeds `glm52_buckets.py`'s CSV instead of
+recomputing).
+
+## compare/glm52_buckets.py
+
+Sorts both sides' kernels into ~9 GLM-5.2 functional buckets (sparse-MLA attn, DSA
+indexer+topk, dense GEMM, MoE up/gate, MoE down, MoE routing, all-reduce,
+rmsnorm/quant, rope/kv-cache) and prints/writes the per-bucket Σ and ratio.
+
+```bash
+python3 trace_analysis/compare/glm52_buckets.py --phase prefill --out cmp.csv \
+    --src SGLANG step3_layer_breakdown_SGLANG.xlsx \
+    --src ATOM   step3_layer_breakdown_ATOM.xlsx
+```
+
+Scope follows the workbook kind and is printed: step3 = decoder layers only, step1 =
+whole forward including the lm_head / sampling tail. Mixing kinds across sides is
+refused. It is also the single source of the bucket regexes (`side_by_side.py` imports
+them), so a workbook's summary and the CSV can never disagree.
 
 ---
 

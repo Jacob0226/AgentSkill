@@ -5,7 +5,7 @@ description: >-
   three layer types (full-indexer + MLP, full-indexer + MoE, shared-indexer + MoE),
   which layer indices each covers, and per-type flow diagrams. Use when analyzing
   GLM-5.2 (or GLM-5 DSA) decode/prefill profiler traces — especially with
-  analyze_trace.py / compare_layer_breakdown.py — when asked how many layer types the
+  analyze_sglang_trace.py / side_by_side.py — when asked how many layer types the
   model has, or when a layer appears to be "missing" the DSA indexer /
   sparse-attention kernels. Explains why the indexer top-k runs on only 21 of 78
   layers so you don't misreport it as a bug or attribution error.
@@ -15,7 +15,7 @@ description: >-
 
 **GLM5.2有shared/full layer，不用每個layer都算indexer。** Seeing the DSA indexer
 top-k kernels on only *some* layers is EXPECTED — do not flag it as an
-attribution bug in the trace or in `analyze_trace.py`.
+attribution bug in the trace or in `analyze_sglang_trace.py`.
 
 GLM-5.2 has exactly **three** decoder-layer types:
 
@@ -62,12 +62,12 @@ Confirmed on trace: an i8k prefill forward contains exactly 21 `topk_transform`,
 `fp8_mqa_logits`, `hadamard_quant` and `indexer_k_quant_and_cache` launches, and 21
 of each Indexer GEMM.
 
-## Implication for analyze_trace.py / compare_layer_breakdown.py
+## Implication for analyze_sglang_trace.py / side_by_side.py
 
-Both live under `~/SGLang-benchmarks/trace_analysis/` (`sglang/analyze_trace.py`,
-`compare/compare_layer_breakdown.py`); that folder's README documents the step3 schema.
+Both live under `~/SGLang-benchmarks/trace_analysis/` (`analyze_sglang_trace.py`,
+`compare/side_by_side.py`); that folder's README documents the step3 schema.
 
-- `analyze_trace.py` step3 groups layers by **the kernels they actually run** and
+- `analyze_sglang_trace.py` step3 groups layers by **the kernels they actually run** and
   aggregates each call site over all 78 layers, so `LaunchCount` (`LaunchCnt` in the
   side-by-side workbooks) is measured, not extrapolated: the indexer rows show 21,
   not 3. (Before Jul 2026 it sampled ONE representative layer per
