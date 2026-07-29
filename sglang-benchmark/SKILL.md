@@ -36,6 +36,22 @@ description: >-
 
 ---
 
+## Before reporting any kernel speedup
+
+Read [microbench-pitfalls.md](microbench-pitfalls.md) **before** writing a
+micro-benchmark, not after. The short version:
+
+- MI355X has a **256 MB Infinity Cache**. Any sweep whose working set fits in it
+  measures cache bandwidth, not the kernel. Rotate ≥ 6 input buffers (> 512 MB
+  total) or the ranking will be wrong — this has already produced one bogus
+  "1.3-1.8x faster tile" that was worth 0% in the real trace.
+- `torch.randn` inputs hide quantization accuracy loss. Any quant change needs
+  GSM8K + output throughput, never a kernel timing alone.
+- Benchmark at the M the scheduler actually emits (read `tok=` off the
+  `prefill[...]` trace annotation), not a round number.
+
+---
+
 ## Target GPUs
 
 Two primary platforms. For detailed specs see [gpu-specs.md](gpu-specs.md).

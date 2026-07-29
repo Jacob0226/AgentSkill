@@ -45,6 +45,21 @@
   - NVLink 5 domain: up to 72 GPUs fully connected
   - Confidential Computing, RAS+
 
+## Cache Hierarchy (matters for micro-benchmarks)
+
+| Level | MI355X | B200 |
+|-------|--------|------|
+| L1 (per CU/SM) | 32 KB vector | 256 KB unified L1/shared |
+| L2 | 4 MB per XCD (8 XCDs) | — |
+| Last level | **256 MB Infinity Cache (MALL)**, memory-side, shared by all XCDs | 126 MB L2 |
+| HBM | 288 GB HBM3e | 192 GB HBM3e |
+
+MI355X's Infinity Cache is the L3-equivalent, but it is *memory-attached*: it
+fronts the memory controllers and caches everything headed to HBM, whichever XCD
+issued the request. Any benchmark whose working set fits in 256 MB runs at
+Infinity-Cache bandwidth, not HBM bandwidth — see
+[microbench-pitfalls.md](microbench-pitfalls.md).
+
 ## Comparison for LLM Serving
 
 | Metric | MI355X | B200 |
