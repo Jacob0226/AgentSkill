@@ -121,6 +121,13 @@ micro-benchmark, not after. The short version:
 - Benchmark at the M the scheduler actually emits (read `tok=` off the
   `prefill[...]` trace annotation), not a round number.
 
+Related: [triton-specialization-cliffs.md](triton-specialization-cliffs.md) for
+why that last point matters so much. Triton `@triton.heuristics` flags are
+`constexpr`, so each combination is a **separate compiled binary** — on the MLA
+absorb bmm, 16 tokens of misalignment flips `EVEN_MN` and costs 2x (3819 vs 1562
+instructions around identical MFMA work). Includes how to diff the ISA of two
+specializations, and why the sibling `EVEN_K` flag is *not* worth chasing.
+
 ---
 
 ## Target GPUs
@@ -139,7 +146,8 @@ Two primary platforms. For detailed specs see [gpu-specs.md](gpu-specs.md).
 
 **MI355X (ROCm)**:
 - `--nsa-prefill-backend tilelang --nsa-decode-backend tilelang`
-- `--disable-shared-experts-fusion` (for dual-stream)
+- `--disable-shared-experts-fusion` (only for the MoE half of dual-stream; it
+  costs 0.76 ms TPOT at conc64, where the MXFP4 MoE kernels already saturate)
 - Env: `SGLANG_ROCM_FUSED_DECODE_MLA=0`, `ROCM_QUICK_REDUCE_QUANTIZATION=INT4`
 
 **B200 (CUDA)**:
@@ -171,8 +179,11 @@ Script: `~/SGLang-benchmarks/GLM.sh`
 # Profile (combined, no stage split)
 ./GLM.sh --prof-combined
 
-# Dual stream on ROCm (disables shared-experts-fusion)
-./GLM.sh --dual-stream-rocm
+# Dual stream on ROCm. --dual-stream-rocm = alt_stream + unfused shared experts;
+# --dual-stream-attn-only = alt_stream only (isolates the overlap from the MoE half).
+# Measured a loss on GLM-5.2 i8k/conc64: +6.3% TPOT as shipped, +3.6% after two
+# fixes -- see tools/dual_stream_conc64_design.md before spending time here.
+./GLM.sh --dual-stream-attn-only
 
 # Custom model path
 ./GLM.sh --model /data/huggingface/hub/zai-org/GLM-5-FP8
@@ -220,7 +231,7 @@ For ROCm HIP stream/event/graph programming model, see [rocm-streams.md](rocm-st
 | `trace_analysis/compare/side_by_side.py` | Put step3 workbooks side by side: `--align lcs` row-aligns two SGLang runs (MI355X vs B200), `--align none` keeps each side's own call order (SGLang vs ATOM) |
 | `trace_analysis/compare/glm52_buckets.py` | Both sides' kernels in ~9 GLM-5.2 functional buckets, from the same step3 workbooks |
 | `trace_analysis/analyze_atom_trace.py` | Same step3 schema for an ATOM trace (SGLang vs ATOM flow) |
-| `trace_analysis/diagnostics/` | `verify_step3_against_trace.py`, `window_kernel_diff.py`, `comm_skew_split.py`, `trace_kernel_summary.py`, `extract_stream.py`, `analyze_trace_overlap.py` |
+| `trace_analysis/diagnostics/` | `verify_step3_against_trace.py`, `window_kernel_diff.py`, `comm_skew_split.py`, `trace_kernel_summary.py`, `extract_stream.py`, `analyze_trace_overlap.py`, `per_forward_kernel_delta.py` (attribute a per-forward regression to individual kernels; normalizes traces that captured different forward counts), `ar_by_layer_type.py` (split decode all-reduce calls by GLM-5.2 layer type — tells a per-fork cost apart from a global one) |
 | `parse_perf_metrics_to_csv.py` | Parse `sglang.bench_serving` result blocks → CSV |
 
 ### Quick Analysis Workflow
@@ -279,6 +290,63 @@ only needs phase1's outputs. Net result: alt finishes later, attn starts later, 
 iteration is slower.
 
 Fix: place `wait_stream` BEFORE any cur kernel alt doesn't actually need.
+
+### Rule 3 — never split a pair that a fused kernel already handles
+
+Before overlapping two ops on separate streams, check whether aiter already fuses
+them. `forward_mla.py` split the q-norm and k-norm across streams whenever
+`alt_stream` existed, which on ROCm/gfx95 threw away `fused_qk_rmsnorm_bf16` /
+`fused_rms_mxfp4_quant` (one launch, and the FP8/MXFP4 quant folded in). Cost:
+**+901 μs per decode forward** — 31% of the entire dual-stream regression — to
+overlap two 4 μs kernels. Anything written for CUDA's unfused path is suspect here.
+
+Symptom in trace: a fused kernel disappears from the dual-stream trace and is
+replaced by two unfused ones plus a pile of `elementwise_kernel_manual_unroll`
+launches. `per_forward_kernel_delta.py` surfaces this immediately as a launch-count
+change, not just a duration change.
+
+### The first fork pays a flat toll (MI355X, ROCm 7.2)
+
+Measured by fork-count sweep, GLM-5.2 TP4 i8k/conc64, median TPOT:
+
+| forks | 0 | 1 | 4 | 8 | 21 |
+|---|---|---|---|---|---|
+| TPOT | 48.04 | 49.78 | 49.87 | 49.95 | 49.91 |
+
+Enabling multi-stream is free: with `SGLANG_ROCM_USE_MULTI_STREAM=1` and
+`alt_stream` allocated but nothing forked, TPOT matches baseline (48.04 vs
+48.10-48.24 over three runs). The **first** cross-stream dependency in the captured
+graph costs **1.65 ms**; the next twenty cost 0.13 ms. After that toll every kernel
+in the graph replays slower, which is why all-reduce slows +1.99 μs/call and MoE
+mfma 1.8-3.1% on the 57 layers that never fork, and why gating forks 78 → 21
+returned only 7%.
+
+Practical consequences:
+
+- **Do not budget per fork; budget one 1.65 ms toll.** If the total hideable work
+  is under ~1.7 ms TPOT, no fork count wins and no stream layout helps.
+- **Once you pay it, fork widely.** Marginal cost past the first fork is ~6 μs
+  against ~20 μs hidden, so a narrow fork is the worst of both worlds.
+- Sweep it yourself with `SGLANG_DS_FORK_MAX_LAYER_ID=<layer-id ceiling>` (in the
+  6PR tree's `forward_mla.py`) plus
+  `VARIANTS="baseline fork0 fork1 fork4 fork8 fork21" tools/dual_stream_conc64_ablation.sh`.
+
+Details and re-test triggers: `SGLang-benchmarks/tools/dual_stream_conc64_design.md`.
+
+### B200 forks the same indexer — check before assuming NVIDIA does it better
+
+GLM-5.2 decode on B200 shows 46 stream IDs. Most are graph-internal partitioning
+that runs back to back, but **21 are functionally specialized**: one per
+full-indexer layer, each carrying only the DSA indexer chain (`paged_mqa_logits`,
+`_act_quant_kernel`, the hadamard `triton_poi_fused_mul`s, q/k proj). Same fork as
+ROCm, same `is_decode_or_idle()` gate, and prefill forks nothing on either
+platform. B200 hides 0.32 ms/forward with it; MI355X hides 0.50 ms. Both are near
+the structural ceiling (~0.42 ms), because the indexer's `topk` feeds sparse MLA so
+only `q_b_proj` plus the pre-attention gemm/rope can overlap, ~20 μs per layer.
+
+So "B200 is faster because it overlaps more streams" is wrong for this model — its
+lead is raw kernel speed (111 ms/prefill pass, ~3.2 ms/decode pass) against ≤0.32 ms
+of indexer overlap.
 
 ### Combined "clean + fast" pattern (GLM-5 NSA decode)
 

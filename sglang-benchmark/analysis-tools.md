@@ -117,7 +117,37 @@ python3 trace_analysis/diagnostics/trace_kernel_summary.py trace.json.gz
 # Per-stream inspection / stream concurrency and bubble time
 python3 trace_analysis/diagnostics/extract_stream.py trace.json.gz --list-streams
 python3 trace_analysis/diagnostics/analyze_trace_overlap.py dual.trace.json.gz single.trace.json.gz
+
+# Attribute a per-forward regression to individual kernels. Normalizes traces that
+# captured a different number of forwards (profile-by-stage often gives 1 vs 2), and
+# surfaces launch-COUNT changes, which is how a lost kernel fusion shows up.
+python3 trace_analysis/diagnostics/per_forward_kernel_delta.py \
+    --a baseline-DECODE.trace.json.gz --b variant-DECODE.trace.json.gz --labels base dual
+
+# Split GLM-5.2 decode all-reduce calls by layer type: tells a per-fork cost apart
+# from a cost that is global to multi-stream graph capture.
+python3 trace_analysis/diagnostics/ar_by_layer_type.py \
+    --label baseline base-DECODE.trace.json.gz --label dual dual-DECODE.trace.json.gz
 ```
+
+### Reading overlap numbers: two traps
+
+1. **`Σ kernel dur / union busy` overstates CUDA overlap ~2x.** CUPTI reports ~1.3 µs
+   of *same-stream* overlap at nearly every kernel boundary, which is physically
+   impossible. On a B200 GLM-5.2 decode trace, 6.06 ms of an apparent 8.48 ms
+   "saving" was same-stream skew; true cross-stream overlap was 3.84 ms. roctracer
+   shows 0.000 ms of this, so MI355X looks "cleaner" purely because of
+   timestamping. Always recompute overlap using cross-stream pairs only before
+   comparing vendors.
+2. **Stream count is not concurrency, but do not conclude that from aggregates.**
+   A CUDA-graph decode trace can show 46 stream IDs where most are graph-internal
+   node partitioning that runs back to back (B200 GLM-5.2: 19 such streams, busy
+   19.8 ms, only 10.9% overlapping the main stream). But in the same trace 21
+   streams *are* functionally specialized, one per full-indexer layer carrying the
+   DSA indexer chain. Grouping kernel names over the whole trace makes them look
+   identical to the rest; you only see it by grouping per stream **and** windowing
+   to one forward. Look for a marker kernel (`paged_mqa_logits`, a collective) and
+   ask which streams carry it.
 
 ---
 

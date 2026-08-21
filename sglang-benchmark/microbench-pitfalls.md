@@ -96,14 +96,20 @@ trace and compare the *same* kernel's total ms, not the micro-benchmark's.
 ## 4. Alignment cliffs are real, but check which side you are on
 
 `M % BLOCK_SIZE_M == 0` flips the aiter Triton `EVEN_MN` heuristic, which
-switches row indexing from modulo-based to direct. Measured on the absorb bmm:
-M=16384 → 165 us, M=16368 → 339 us. A **2.2x cliff from 16 tokens.**
+selects a **different compiled binary** — 2.44x the instructions around
+identical MFMA work. Measured on the absorb bmm: M=16384 → 155.8 us,
+M=16368 → 311.2 us. A **2x cliff from 16 tokens.**
 
 This one is genuine (it reproduces cold-cache and in the real trace), but it
 means a sweep at a convenient round M reports numbers the production workload
 will never see. SGLang's scheduler delivers 16289-16368, not 16384 — always
 benchmark at the M the scheduler actually produces, which you can read off the
 `prefill[... tok=N ...]` annotation in the trace.
+
+The mechanism, the ISA evidence, and the two explanations that sound right but
+are wrong ("the modulo breaks load coalescing", "`EVEN_K` must matter for the
+same reason") are in
+[triton-specialization-cliffs.md](triton-specialization-cliffs.md).
 
 ---
 
