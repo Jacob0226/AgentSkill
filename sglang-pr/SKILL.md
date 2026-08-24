@@ -49,8 +49,10 @@ change, then accuracy.
   anything else moved, the table is not evidence.
 - **Name the thing.** The kernel symbol, the tuning key, the env var — a reviewer greps for it.
 - Bold the deltas worth reading. Leaving noise-level rows unbolded is itself information.
-- Report **mean TTFT** and **median TPOT**, the two `sglang.bench_serving` headline metrics,
-  and sweep concurrency rather than quoting one point.
+- Report **mean TTFT** and **median TPOT**, and sweep concurrency rather than quoting one
+  point. **Name the statistic in the table header**, never a bare "TTFT": `bench_serving`
+  prints mean, median and P99 for each, and they diverge — one GLM-5.2 run at i8k/conc4 reads
+  492.08 mean against 389.20 median TTFT, so an unlabelled column is unreproducible.
 - Always include accuracy, with the caveat: "GSM8K 0.933 → 0.927, single scoring pass each —
   within what one pass resolves." A small accuracy move that goes unmentioned reads as hidden.
 - Explain a trend when the table shows one — e.g. a per-forward saving grows with concurrency
