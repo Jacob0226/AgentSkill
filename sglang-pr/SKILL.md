@@ -1,6 +1,6 @@
 ---
 name: sglang-pr
-description: Write pull request descriptions for sgl-project/sglang in the Summary / Scope / Test plan format, each section capped at 50 words with the detail carried by tables. Use when opening, drafting, or rewriting an SGLang PR body, especially for AMD/ROCm performance work on MI355X.
+description: Write pull request descriptions for sgl-project/sglang in the Summary / Scope / Test plan format, each section capped at 100 words with the detail carried by tables. Use when opening, drafting, or rewriting an SGLang PR body, especially for AMD/ROCm performance work on MI355X.
 ---
 # SGLang PR Description
 
@@ -9,9 +9,9 @@ Three sections, in this order: **Summary**, **Scope**, **Test plan**. Nothing el
 No `Changes` section. Summary already says what the change does; a file-by-file list only
 restates the diff the reviewer is about to read.
 
-## The 50-word rule
+## The 100-word rule
 
-Each section's **prose** is capped at 50 words. Tables and code blocks do not count.
+Each section's **prose** is capped at 100 words. Tables and code blocks do not count.
 
 That cap is the format. A reviewer should get three short paragraphs and three tables, not
 three pages. When a section runs long the fix is to move detail into a table, not to shave
@@ -23,7 +23,7 @@ words evenly off every sentence.
 
 The mechanism, then the change. Most SGLang PRs are performance work, so lead with *why the
 current code costs what it costs* — a reviewer who understands the mechanism can predict the
-speedup without reading the diff. Symptom-first summaries ("X is slow") waste the 50 words.
+speedup without reading the diff. Symptom-first summaries ("X is slow") waste the budget.
 
 Carry the evidence in a table: the kernel, the key, or the counter that moves.
 
@@ -64,8 +64,9 @@ Numbers come from `~/SGLang-benchmarks/` bench logs and the step3 trace workbook
 
 ## Worked example
 
-[#32888](https://github.com/sgl-project/sglang/pull/32888), condensed to the word cap. A
-chunked-prefill change: this is the shape a performance PR should take.
+[#32888](https://github.com/sgl-project/sglang/pull/32888), condensed. A chunked-prefill
+change: this is the shape a performance PR should take. Its sections run near 50 words, well
+inside the cap — treat 100 as the ceiling, not the target.
 
 ```markdown
 ## Summary
@@ -152,7 +153,7 @@ EOF
 )"
 ```
 
-The commit message carries the long-form reasoning the 50-word sections cannot. Title starts
+The commit message carries the long-form reasoning the 100-word sections cannot. Title starts
 with `[AMD]`, plus `[gfx95]` when the change is gated on the architecture.
 
 Open as **draft** until CI is green. A maintainer adds the `amd` and `run-ci` labels; CI does
