@@ -54,6 +54,12 @@ Step 1 earns its place by making the PR reproducible, not by proving anything; s
 the tuner, because a reader who reruns the default one will not reproduce your rows. Step 1 never
 doubles as evidence — see the tuner-`us` warning above.
 
+**A/B the tuner's own output against the row it replaces, before shipping it.** A tuning PR that
+argues the tuner overwrote a good row without measuring it, and then ships a fresh tune unchecked,
+has made exactly the mistake it is reporting. Run the new rows against the old ones on the harness
+from Step 2. When the recorded row wins, restore it verbatim and let the losing tune become the
+Test Plan's argument for why re-tuning was not the fix.
+
 Name the level a harness actually measures. An op test that calls the production function is not
 end-to-end: it is the same function on synthetic inputs, which is what makes it a clean one-
 variable A/B. Say that, rather than letting "E2E" imply a serving run you did not do.
