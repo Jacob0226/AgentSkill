@@ -153,14 +153,21 @@ how narrow the damage was: **candidates 16–174 reproduce within 3.5%, median
 0.1%**, and the two reruns agree with each other to 0.7%. Only two candidates
 were hit, #2 at x1.62 and #6 at x1.22, while #1, #3, #4 and #5 were clean.
 
-The first sweep ran five shapes on five GPUs concurrently; the reruns ran one
-shape alone. Both casualties land in the first six candidates, i.e. the window
-where the other four workers were still JIT-compiling and allocating ~1.2 GB of
-expert weights. Transient host contention at sweep start is the likely mechanism.
+**The cause was never identified, and that is the point.** Ruled out by
+experiment: the parallel configuration (the bad sweep ran five shapes on five
+GPUs, the clean reruns ran one shape alone — but repeating the five-shape
+parallel sweep came back with max inflation x1.04 and no candidate over 10%); the
+kernel itself; its position in the sweep; cache residency; and the iteration
+count, since all 101 iterations of that session were slow together. What is left
+is a transient on a shared box during one ~10 second window, with no per-second
+telemetry recorded to identify it after the fact.
 
 So the tuner is *precise* — and that is exactly why nobody checks it. A ~1%
 reproducible harness that silently produces a 62% outlier once per ~90
-measurements is more dangerous than a visibly noisy one.
+measurements is more dangerous than a visibly noisy one. Across four sweeps
+(696 measurements) both casualties fell in the same sweep, so the contamination
+clusters in time: a single-sample-per-candidate design has no defence against
+that, while repeating the measurement works whatever the cause turns out to be.
 
 ### The chronic failure: a per-kernel offset between the two rulers
 
@@ -195,8 +202,8 @@ fresh tune, unchecked. A/B against the row being replaced caught it: the
 - Never ship a sweep winner without an A/B against the incumbent config, through
   the function production calls (for MoE that is `fused_moe`, not the tuner's
   internal timing path).
-- Run the sweep with one shape per GPU at a time if you can afford it, or discard
-  and re-measure the first ~10 candidates of each parallel worker.
+- Do not spend the afternoon diagnosing the transient. On a shared box you will
+  usually not find it, and the fix is the same either way: measure again.
 
 ---
 
