@@ -41,6 +41,17 @@ if it is not obvious (`--shape` is `B M N K`; `B=16` is GLM-5.2 TP4's local head
 State how the two arms are produced: for a config PR, that is usually moving the JSON or CSV in
 and out of the config directory, which is the cleanest one-variable A/B available.
 
+When a tuner run produced the new config, the section holds **two commands with two different
+jobs**, and a reader who cannot tell them apart will ask why you ran the same thing twice. Label
+them as ordered steps and say outright that the tuner's output *is* the diff:
+
+    **Step 1, produce the rows** — the diff here is this run's output. <tuner command>
+    **Step 2, check they are faster** — <benchmark command>
+
+Step 1 earns its place by making the PR reproducible, not by proving anything; say which tuner
+entry point, because a reader who reruns the default one will not reproduce your rows. Step 1
+never doubles as evidence — see the tuner-`us` warning above.
+
 ### Test Result
 
 Lead with the kernel table, swept over the dimension the entry is gated on (usually M or token
