@@ -44,6 +44,10 @@ change, then accuracy.
 
 ## Rules
 
+- **Never hard-wrap the body.** One line per paragraph, however long. GitHub soft-wraps to the
+  reader's width, so inserting your own newlines only fixes the text to a width nobody has and
+  makes every later edit rewrap the whole paragraph. This applies to the PR body and to
+  comments; the commit message still wraps at 72.
 - **Measured numbers, never adjectives.** "163.5 → 136.6 ms", not "significantly faster".
 - **One variable.** Both arms share an image, a model, a TP, and a PR stack; say so. If
   anything else moved, the table is not evidence.
@@ -71,10 +75,7 @@ inside the cap — treat 100 as the ceiling, not the target.
 ```markdown
 ## Summary
 
-A prefill batch never reaches `chunked_prefill_size`: `_update_prefill_budget` charges the
-page-ceiled extend length, and `add_one_req` floors the last truncation back to a page. On
-gfx95, landing 16 tokens short doubles the MLA absorb bmm — its `EVEN_MN` heuristic is a
-compile-time `constexpr`, so a misaligned M selects a different compiled binary.
+A prefill batch never reaches `chunked_prefill_size`: `_update_prefill_budget` charges the page-ceiled extend length, and `add_one_req` floors the last truncation back to a page. On gfx95, landing 16 tokens short doubles the MLA absorb bmm — its `EVEN_MN` heuristic is a compile-time `constexpr`, so a misaligned M selects a different compiled binary.
 
 |                        | before             | after              |
 | ---------------------- | ------------------ | ------------------ |
@@ -86,8 +87,7 @@ compile-time `constexpr`, so a misaligned M selects a different compiled binary.
 
 ## Scope
 
-gfx95 (MI355X) chunked prefill, gated on `SGLANG_EXACT_CHUNK_FILL` **and** gfx95. CUDA and
-other AMD parts keep upstream behaviour on every path. The dLLM path is excluded.
+gfx95 (MI355X) chunked prefill, gated on `SGLANG_EXACT_CHUNK_FILL` **and** gfx95. CUDA and other AMD parts keep upstream behaviour on every path. The dLLM path is excluded.
 
 ## Test plan
 
@@ -103,9 +103,7 @@ in8192 / out1024.
 | 32          | 1558.20        | 1442.90 | **−7.4%** | 31.00            | 30.37   | **−2.0%** |
 | 64          | 2742.82        | 2481.36 | **−9.5%** | 49.83            | 48.39   | **−2.9%** |
 
-Mean TTFT improves monotonically with concurrency, which is what a shorter prefill should look
-like: the saving is per prefill forward, so the deeper the queue, the more of them a request
-waits behind.
+Mean TTFT improves monotonically with concurrency, which is what a shorter prefill should look like: the saving is per prefill forward, so the deeper the queue, the more of them a request waits behind.
 
 Prefill kernel attribution, one forward at in8192 / concurrency 64:
 

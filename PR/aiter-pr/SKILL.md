@@ -51,6 +51,10 @@ acceptable. A reviewer's first question about a tuning change is "what did you m
 
 ## Rules
 
+- **Never hard-wrap the body.** One line per paragraph, however long. GitHub soft-wraps to the
+  reader's width, so inserting your own newlines only fixes the text to a width nobody has and
+  makes every later edit rewrap the whole paragraph. This applies to the PR body and to
+  comments; the commit message still wraps at 72.
 - **Measured numbers, never adjectives.** "409.2 → 163.0 us", not "much faster".
 - **One variable.** Both arms share the image, the versions, and everything but the config
   under test. If anything else moved, the table is not evidence.
@@ -91,20 +95,13 @@ shape one should take.
 ```markdown
 ## Motivation
 
-gfx950 `BATCHED_GEMM-A8W8-A_PER_TOKEN_GROUP_PREQUANT_W_PER_BATCHED_TENSOR_QUANT` has no
-specialized file for the GLM-5.2 MLA absorb BMMs (`w_kc` N=512/K=192, `w_vc` N=256/K=512), and
-the generic table stops at `M_LEQ_256`, so large-M prefill falls through to `"any"` (32x128 /
-`num_warps=8`) — a smaller tile than `M_LEQ_256` already uses. A prefill-shaped M runs on a
-decode-shaped tile.
+gfx950 `BATCHED_GEMM-A8W8-A_PER_TOKEN_GROUP_PREQUANT_W_PER_BATCHED_TENSOR_QUANT` has no specialized file for the GLM-5.2 MLA absorb BMMs (`w_kc` N=512/K=192, `w_vc` N=256/K=512), and the generic table stops at `M_LEQ_256`, so large-M prefill falls through to `"any"` (32x128 / `num_warps=8`) — a smaller tile than `M_LEQ_256` already uses. A prefill-shaped M runs on a decode-shaped tile.
 
-Two JSON configs, no code. A per-(N,K) file replaces the generic dict outright, so `M_LEQ_*`
-and `"any"` are copied verbatim and nothing below the new bucket changes.
+Two JSON configs, no code. A per-(N,K) file replaces the generic dict outright, so `M_LEQ_*` and `"any"` are copied verbatim and nothing below the new bucket changes.
 
 ## Test Plan
 
-MI355X (gfx950), ROCm 7.2, Triton 3.7, `rocm/sgl-dev:v0.5.17-rocm720-mi35x-20260811`. Kernel
-A/B with aiter's own benchmark, moving the two JSONs in and out of
-`aiter/ops/triton/configs/gemm/`:
+MI355X (gfx950), ROCm 7.2, Triton 3.7, `rocm/sgl-dev:v0.5.17-rocm720-mi35x-20260811`. Kernel A/B with aiter's own benchmark, moving the two JSONs in and out of `aiter/ops/triton/configs/gemm/`:
 
     BENCH=op_tests/op_benchmarks/triton/bench_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py
     python3 $BENCH --shape 16 16384 512 192 --metric time --no-bias                 # w_kc
@@ -125,8 +122,7 @@ A/B with aiter's own benchmark, moving the two JSONs in and out of
 | 8192  | 210.6        | **87.7**  | 171.9        | **80.7**  |
 | 16384 | 409.2        | **163.0** | 321.8        | **142.2** |
 
-2.5x / 2.3x at M=16384, and no M is slower than before — `w_vc` at M=512 still resolves to
-`"any"`, unchanged.
+2.5x / 2.3x at M=16384, and no M is slower than before — `w_vc` at M=512 still resolves to `"any"`, unchanged.
 ```
 
 Note what the M=512 row buys: it is the point where the new entry is *not* a win, and shipping
