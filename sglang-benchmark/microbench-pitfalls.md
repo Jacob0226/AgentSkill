@@ -113,11 +113,11 @@ same reason") are in
 
 ---
 
-## 5. A sweep that times each candidate once is ranking noise
+## 5. An autotuner's winner is not the fastest kernel
 
-**The rule: if an autotuner measures every candidate once and keeps the argmin,
-its winner is partly a lucky draw. Re-measure the top few, and check the winner
-against the incumbent on the production entry point before believing the order.**
+**The rule: a sweep ranks candidates on its own timing path. Re-measure its
+winner and its runners-up against the incumbent, on the function production
+calls, before believing the order.**
 
 aiter's `gemm_moe_tune.py --mxfp4-flydsl` sweeps 174 (stage-1, stage-2) pairs per
 shape. Each one gets a single `run_perftest(warmup=5, iters=101)`, then:
@@ -128,35 +128,60 @@ if best is None or us < float(best["us"]):
     best = candidate
 ```
 
-No repeat, no outlier rejection, no re-check of the top-k. 101 iterations inside
-one measurement does not help: it tightens that one sample, it does not tell you
-whether the sample itself landed wrong.
+101 iterations inside one measurement and one measurement per candidate are not
+the same thing. The inner loop averages away launch-to-launch jitter; nothing
+averages away whatever the machine was doing during that one session. There is no
+repeat, no outlier rejection, and no re-check of the top-k.
 
-### What it cost us
+Two independent failures came out of this, and they need separating — the loud
+one is not the important one.
 
-Three identical sweeps of GLM-5.2 MoE token=128, same box, same build. Watching
-one candidate, `flydsl_mxmoe_g2_a4w4_16x256x256_atomic_nt`, always timed second:
+### The acute failure: a contaminated session, never re-checked
 
-| sweep | that kernel | its rank | sibling `_atomic`, control |
+Three identical sweeps of GLM-5.2 MoE token=128, same box, same build, watching
+`flydsl_mxmoe_g2_a4w4_16x256x256_atomic_nt` (always timed as candidate #2):
+
+| sweep | that kernel | its rank | sibling `_atomic`, #1, control |
 |---|---|---|---|
 | first | **336.87** | 168 / 174 | 220.71 |
 | rerun 1 | 208.20 | 6 / 174 | 219.28 |
 | rerun 2 | 207.83 | 7 / 174 | 216.27 |
 
-One bad sample buried a good kernel at rank 168. It was not the machine, the
-position in the sweep, or a cache effect — all of those would reproduce, and the
-sibling timed immediately before it stayed flat across all three.
+One session ran 62% slow for all 101 of its iterations and buried a good kernel
+at rank 168. Comparing the full 174-candidate distributions across the runs shows
+how narrow the damage was: **candidates 16–174 reproduce within 3.5%, median
+0.1%**, and the two reruns agree with each other to 0.7%. Only two candidates
+were hit, #2 at x1.62 and #6 at x1.22, while #1, #3, #4 and #5 were clean.
 
-The subtler half is that **even the clean reruns rank it wrong.** The sweep put a
-`moe2_layout` kernel first at 203.5 us with this one 6th at 207.8, a 2.2% gap;
-measured through `fused_moe`, the "loser" wins 225.0 vs 232.8. At a 2-3%
-separation the sweep has no resolving power, so its order is arbitrary.
+The first sweep ran five shapes on five GPUs concurrently; the reruns ran one
+shape alone. Both casualties land in the first six candidates, i.e. the window
+where the other four workers were still JIT-compiling and allocating ~1.2 GB of
+expert weights. Transient host contention at sweep start is the likely mechanism.
 
-Selection bias is measurable here. For a kernel the sweep did *not* pick, sweep
-208 vs production 225 is 7.5% optimistic — that is just the two harnesses timing
-different regions. For the kernel it *did* pick, 203.5 vs 232.8 is 12.6%. The
-extra ~5 points is the argmin: take the minimum of 174 noisy draws and you
-preferentially select whichever candidate got the fastest bad measurement.
+So the tuner is *precise* — and that is exactly why nobody checks it. A ~1%
+reproducible harness that silently produces a 62% outlier once per ~90
+measurements is more dangerous than a visibly noisy one.
+
+### The chronic failure: a per-kernel offset between the two rulers
+
+**Even the clean reruns rank it wrong**, and this is the half that matters:
+
+| kernel | sweep (clean reruns) | production `fused_moe` | offset |
+|---|---|---|---|
+| `moe2_layout` sweep winner | 203.5 | 232.8 | +14.4% |
+| `mxmoe_g2_a4w4_..._atomic_nt` | 208.0 | 225.0 | +8.2% |
+
+The sweep says the winner is 2.2% faster; production says it is 3.4% slower. The
+offset between the two harnesses is not a constant, so any ranking gap smaller
+than the spread *of the offsets* is not just unreliable, it is systematically
+reversible. Repeating the sweep does not help — both reruns ordered it wrong.
+
+Do not reach for "selection bias" to explain this. Argmin over N noisy draws does
+bias the winner optimistic, but with ~1% per-measurement spread that effect is
+worth ~1%, not the 6 points seen here. The offset is a property of what each
+harness times, not of how many candidates were sampled.
+
+### What it cost us
 
 This nearly shipped. The aiter PR it appeared in argued that a tuner had
 overwritten a good config without measuring it — and then proposed shipping a
@@ -165,11 +190,13 @@ fresh tune, unchecked. A/B against the row being replaced caught it: the
 
 ### The fix
 
-- Re-measure the top ~10 candidates, several times each, and rank on the median.
-- Treat any gap under ~5% in a single-sample sweep as a tie, not an ordering.
-- Never ship a sweep winner without an A/B against the incumbent config on the
-  function production actually calls (for MoE that is `fused_moe`, not the
-  tuner's internal timing path).
+- Re-measure the sweep's top ~10 on the production entry point, several times
+  each, and rank on the median. Ranking on the sweep's own numbers is the bug.
+- Never ship a sweep winner without an A/B against the incumbent config, through
+  the function production calls (for MoE that is `fused_moe`, not the tuner's
+  internal timing path).
+- Run the sweep with one shape per GPU at a time if you can afford it, or discard
+  and re-measure the first ~10 candidates of each parallel worker.
 
 ---
 
@@ -182,5 +209,5 @@ Before reporting any micro-benchmark result:
 - [ ] Real activation distributions if quantization is involved
 - [ ] Confirmed against the same kernel's total ms in an end-to-end trace
 - [ ] Accuracy + output throughput checked if anything numeric changed
-- [ ] Autotuner winners re-measured against the incumbent, not trusted on the
-      sweep's own single-sample ranking
+- [ ] Autotuner winners re-measured on the production entry point, not trusted on
+      the sweep's own ranking
