@@ -12,7 +12,10 @@ find "$SKILLS_DIR" -maxdepth 1 -type l ! -exec test -e {} \; -print | while read
     rm "$link"
 done
 
-for skill_dir in "$SCRIPT_DIR"/*/; do
+# Skills live either at the top level or one directory down, so related skills
+# can be grouped (e.g. PR/sglang-pr, PR/aiter-pr). The group directory itself
+# has no SKILL.md and is not linked; only the leaves are.
+for skill_dir in "$SCRIPT_DIR"/*/ "$SCRIPT_DIR"/*/*/; do
     [ -f "$skill_dir/SKILL.md" ] || continue
     skill_name="$(basename "$skill_dir")"
     target="$SKILLS_DIR/$skill_name"
