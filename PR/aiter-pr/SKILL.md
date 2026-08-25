@@ -42,15 +42,21 @@ State how the two arms are produced: for a config PR, that is usually moving the
 and out of the config directory, which is the cleanest one-variable A/B available.
 
 When a tuner run produced the new config, the section holds **two commands with two different
-jobs**, and a reader who cannot tell them apart will ask why you ran the same thing twice. Label
-them as ordered steps and say outright that the tuner's output *is* the diff:
+jobs**, and a reader who cannot tell them apart will ask why you ran the same thing twice. Give
+each step a bold lead naming **the script and what it is for** — not just the action, which
+leaves the reader to work out who does it to what:
 
-    **Step 1, produce the rows** — the diff here is this run's output. <tuner command>
-    **Step 2, check they are faster** — <benchmark command>
+    **Step 1 — `gemm_moe_tune.py` produces the config CSV.** <which mode, and why that one>
+    **Step 2 — `test_moe_2stage.py` benchmarks that CSV through `fused_moe`, the function the
+    model calls at every MoE layer.** <how the A/B is set up>
 
-Step 1 earns its place by making the PR reproducible, not by proving anything; say which tuner
-entry point, because a reader who reruns the default one will not reproduce your rows. Step 1
-never doubles as evidence — see the tuner-`us` warning above.
+Step 1 earns its place by making the PR reproducible, not by proving anything; say which mode of
+the tuner, because a reader who reruns the default one will not reproduce your rows. Step 1 never
+doubles as evidence — see the tuner-`us` warning above.
+
+Name the level a harness actually measures. An op test that calls the production function is not
+end-to-end: it is the same function on synthetic inputs, which is what makes it a clean one-
+variable A/B. Say that, rather than letting "E2E" imply a serving run you did not do.
 
 ### Test Result
 
