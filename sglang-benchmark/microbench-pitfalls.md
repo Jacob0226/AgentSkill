@@ -113,6 +113,66 @@ same reason") are in
 
 ---
 
+## 5. A sweep that times each candidate once is ranking noise
+
+**The rule: if an autotuner measures every candidate once and keeps the argmin,
+its winner is partly a lucky draw. Re-measure the top few, and check the winner
+against the incumbent on the production entry point before believing the order.**
+
+aiter's `gemm_moe_tune.py --mxfp4-flydsl` sweeps 174 (stage-1, stage-2) pairs per
+shape. Each one gets a single `run_perftest(warmup=5, iters=101)`, then:
+
+```python
+us = self._run_candidate(row, candidate, args)
+if best is None or us < float(best["us"]):
+    best = candidate
+```
+
+No repeat, no outlier rejection, no re-check of the top-k. 101 iterations inside
+one measurement does not help: it tightens that one sample, it does not tell you
+whether the sample itself landed wrong.
+
+### What it cost us
+
+Three identical sweeps of GLM-5.2 MoE token=128, same box, same build. Watching
+one candidate, `flydsl_mxmoe_g2_a4w4_16x256x256_atomic_nt`, always timed second:
+
+| sweep | that kernel | its rank | sibling `_atomic`, control |
+|---|---|---|---|
+| first | **336.87** | 168 / 174 | 220.71 |
+| rerun 1 | 208.20 | 6 / 174 | 219.28 |
+| rerun 2 | 207.83 | 7 / 174 | 216.27 |
+
+One bad sample buried a good kernel at rank 168. It was not the machine, the
+position in the sweep, or a cache effect — all of those would reproduce, and the
+sibling timed immediately before it stayed flat across all three.
+
+The subtler half is that **even the clean reruns rank it wrong.** The sweep put a
+`moe2_layout` kernel first at 203.5 us with this one 6th at 207.8, a 2.2% gap;
+measured through `fused_moe`, the "loser" wins 225.0 vs 232.8. At a 2-3%
+separation the sweep has no resolving power, so its order is arbitrary.
+
+Selection bias is measurable here. For a kernel the sweep did *not* pick, sweep
+208 vs production 225 is 7.5% optimistic — that is just the two harnesses timing
+different regions. For the kernel it *did* pick, 203.5 vs 232.8 is 12.6%. The
+extra ~5 points is the argmin: take the minimum of 174 noisy draws and you
+preferentially select whichever candidate got the fastest bad measurement.
+
+This nearly shipped. The aiter PR it appeared in argued that a tuner had
+overwritten a good config without measuring it — and then proposed shipping a
+fresh tune, unchecked. A/B against the row being replaced caught it: the
+"improved" pick was 11.0% slower at token=32.
+
+### The fix
+
+- Re-measure the top ~10 candidates, several times each, and rank on the median.
+- Treat any gap under ~5% in a single-sample sweep as a tie, not an ordering.
+- Never ship a sweep winner without an A/B against the incumbent config on the
+  function production actually calls (for MoE that is `fused_moe`, not the
+  tuner's internal timing path).
+
+---
+
 ## Pre-flight checklist
 
 Before reporting any micro-benchmark result:
@@ -122,3 +182,5 @@ Before reporting any micro-benchmark result:
 - [ ] Real activation distributions if quantization is involved
 - [ ] Confirmed against the same kernel's total ms in an end-to-end trace
 - [ ] Accuracy + output throughput checked if anything numeric changed
+- [ ] Autotuner winners re-measured against the incumbent, not trusted on the
+      sweep's own single-sample ranking
