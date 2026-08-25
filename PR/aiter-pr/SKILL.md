@@ -181,5 +181,13 @@ Everything else is opt-in via labels, added in the sidebar or with
 | `ci:vllm`        | vLLM benchmark: GPT-OSS-120B, DeepSeek-R1-0528, Kimi-K2.5  |
 | `ci:all`         | All standard extended tests (excludes `ci:atom_full`)      |
 
-A FlyDSL or tuned-config change should carry `ci:atom_full`; a Triton config change usually
-wants `ci:sglang` so a model-level accuracy run backs the kernel table.
+Read `ci:atom_full`'s restriction literally: **upgrades** to FlyDSL or Triton, meaning the
+library or compiler itself. A tuned config that happens to select FlyDSL kernels is not an
+upgrade and must not carry it.
+
+Default to no extra label and justify each one you add. A tuned table is keyed by shape, so it
+can only affect the model whose shape it carries — a `glm5_fp4_tuned_fmoe.csv` row cannot reach
+`ci:sglang`'s DeepSeek-R1 and Qwen 3.5 or `ci:atom`'s DeepSeek-R1-0528 and GPT-OSS-120B, and
+asking for them burns machine time on a run that cannot observe the change. Add a label when
+the change reaches a model the suite actually runs, or when it touches dispatch rather than a
+single keyed row.
