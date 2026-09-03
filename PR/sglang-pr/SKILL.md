@@ -25,7 +25,9 @@ The mechanism, then the change. Most SGLang PRs are performance work, so lead wi
 current code costs what it costs* — a reviewer who understands the mechanism can predict the
 speedup without reading the diff. Symptom-first summaries ("X is slow") waste the budget.
 
-Carry the evidence in a table: the kernel, the key, or the counter that moves.
+Carry the evidence in **one** table: the kernel, the key, or the counter that moves. One table
+only — a second one in the same section reads as two competing summaries and the reviewer has to
+work out which is the point. If the detail does not fit, it belongs in Scope or Test plan.
 
 ### Scope
 
@@ -37,7 +39,7 @@ when they are untouched.
 ### Test plan
 
 Name the exact base first, or the numbers mean nothing: the docker image tag and the PR stack
-applied on top of it. Then state which **single variable** separates the two arms.
+applied on top of it. Then state which **single variable** separates the two builds.
 
 Tables follow: end-to-end latency, then kernel-level attribution if the change is a kernel
 change, then accuracy.
@@ -49,8 +51,10 @@ change, then accuracy.
   makes every later edit rewrap the whole paragraph. This applies to the PR body and to
   comments; the commit message still wraps at 72.
 - **Measured numbers, never adjectives.** "163.5 → 136.6 ms", not "significantly faster".
-- **One variable.** Both arms share an image, a model, a TP, and a PR stack; say so. If
+- **One variable.** Both builds share an image, a model, a TP, and a PR stack; say so. If
   anything else moved, the table is not evidence.
+- **Never write "arm".** Trial jargon for "one side of the comparison"; nobody in the repo uses
+  it. Say "baseline" and "this PR", and head the column `Build`, `Variant` or `Case`.
 - **Name the thing.** The kernel symbol, the tuning key, the env var — a reviewer greps for it.
 - Bold the deltas worth reading. Leaving noise-level rows unbolded is itself information.
 - Report **mean TTFT** and **median TPOT**, and sweep concurrency rather than quoting one
@@ -124,7 +128,7 @@ Only dense/linear GEMM improves, as expected; the other categories shift within 
 
 Note what the attribution table buys: it shows the saving landed *where the mechanism
 predicted* and nowhere else. A summary that claims a GEMM win and a table that shows attention
-also moving means the arms differed in something else.
+also moving means the two builds differed in something else.
 
 ## Opening the PR
 
