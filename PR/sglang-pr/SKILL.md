@@ -9,6 +9,57 @@ Three sections, in this order: **Summary**, **Scope**, **Test plan**. Nothing el
 No `Changes` section. Summary already says what the change does; a file-by-file list only
 restates the diff the reviewer is about to read.
 
+## Write for a reviewer who has not read the code
+
+This is the rule that outranks the rest. There are far more PRs than reviewers, and whoever
+picks up an AMD change is rarely the person who wrote the path you are touching. Every symbol
+they have to look up is a reason to put the tab aside. A PR a newcomer can follow gets merged; a
+correct one that reads like a design document waits.
+
+**Open with the observable failure, in plain words, before any symbol.** What breaks, what the
+operator sees, and what that symptom means — then name the function.
+[#37673](https://github.com/sgl-project/sglang/pull/37673) is the model to copy: it starts with
+the checkpoint that will not load and the exact assertion, adds one sentence of translation ("the
+2x width is the signature of an MXFP4-packed parameter meeting an unpacked BF16 weight — i.e. a
+layer the checkpoint excluded from quantization got quantized anyway"), and only then reaches for
+`should_ignore_layer`.
+
+Tests to run against your own Summary:
+
+| Symptom | Fix |
+| --- | --- |
+| The first sentence names a private function | Move it down. Open with what fails. |
+| One sentence carries three or more symbols | Split it, or replace two of them with what they do |
+| Following it needs another file open | Say what that file does, in words, instead of citing it |
+| The design arrives before the problem | Reverse them: problem, cause, fix |
+
+With more than one root cause, number them. #37673's "1. Already-fused modules named directly.
+2. Per-expert MoE excludes." gives a reviewer two short claims to check one at a time instead of
+one paragraph to untangle.
+
+Simple means fewer unexplained symbols, never vaguer claims. The measured-numbers rule below is
+not relaxed by this one.
+
+## Favour the reviewer over the abstraction
+
+When a clean object-oriented shape and an obvious diff pull apart, take the obvious diff.
+Reviewer attention is the scarce resource; elegance is not.
+
+| Prefer | Over |
+| --- | --- |
+| An explicit `if is_hip():` where the reviewer is already reading | A dispatch layer that moves the decision somewhere they must go find |
+| Four repeated lines in two branches | A helper that hides the very difference under review |
+| One flat function with the steps in order | A correct class hierarchy that costs three files to read |
+| A named local that spells the computation out | A shorter comprehension that is harder to check |
+
+Two limits. Never duplicate anything that has to stay in sync to be correct — the two sides of a
+cache layout, a config key read in two places — because a reviewer cannot see a silent
+divergence. And follow the shape of the file you are editing: a readable diff looks like its
+neighbours, so this never licenses a private style.
+
+When you take the trade deliberately, say so in Scope in one clause, or it reads as an oversight:
+"routed through `X` rather than adding a backend class, to keep the change in one file."
+
 ## The 100-word rule
 
 Each section's **prose** is capped at 100 words. Tables and code blocks do not count.

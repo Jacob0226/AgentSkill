@@ -9,6 +9,49 @@ Three sections, in this order: **Motivation**, **Test Plan**, **Test Result**. N
 No `Technical Details` section. Motivation already states the mechanism, and the diff of a
 config PR *is* the technical detail — restating it burns the reader's budget twice.
 
+## Write for a reviewer who has not read the code
+
+This is the rule that outranks the rest. There are far more PRs than reviewers, and whoever
+picks up a tuning change is rarely the person who wrote the dispatch path it lands in. Every
+symbol they have to look up is a reason to put the tab aside. A PR a newcomer can follow gets
+merged; a correct one that reads like a design document waits.
+
+**Open with the observable problem, in plain words, before any symbol.** For aiter that is
+usually "this shape runs on a tile meant for a different regime, and here is how much that
+costs" — a sentence anyone can check against the table — and only then the table name, the
+bucket and the fallback key.
+[sgl-project/sglang#37673](https://github.com/sgl-project/sglang/pull/37673) is the model to
+copy for shape, even though it is a different repo: observable failure first, one sentence
+translating what the symptom means, then the function.
+
+Tests to run against your own Motivation:
+
+| Symptom | Fix |
+| --- | --- |
+| The first sentence is a config key | Move it down. Open with what runs slowly and why. |
+| One sentence carries three or more symbols | Split it, or replace two of them with what they do |
+| Following it needs the tuned CSV open | Say what the entry selects, in words, and quote the row |
+| The fix arrives before the problem | Reverse them: problem, cause, fix |
+
+Simple means fewer unexplained symbols, never vaguer claims. The measured-numbers rule below is
+not relaxed by this one.
+
+## Favour the reviewer over the abstraction
+
+When a clean structure and an obvious diff pull apart, take the obvious diff. Reviewer attention
+is the scarce resource; elegance is not. For kernel and harness code that means an explicit
+branch where the reviewer is already reading beats a new indirection they have to chase, and a
+flat sequence of steps beats a correct abstraction spread over three files.
+
+Two limits. Never duplicate anything that has to stay in sync to be correct — a tile constant a
+kernel and its wrapper both assume, a key written in two tables — because a reviewer cannot see
+a silent divergence. And follow the shape of the file you are editing; a readable diff looks
+like its neighbours.
+
+A per-(N,K) config file that copies `M_LEQ_*` and `"any"` verbatim is this rule already working:
+it is more bytes than editing the generic dict, and it is approvable at a glance because
+nothing below the new bucket can have moved.
+
 ## The 100-word rule
 
 Each section's **prose** is capped at 100 words. Tables and code blocks do not count.
