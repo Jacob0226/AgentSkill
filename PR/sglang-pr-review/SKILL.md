@@ -100,15 +100,28 @@ A new Triton or JIT kernel under `python/sglang/kernels/` ships with a test
 under `test/registered/`. Registration is an AST marker; the runtime call is a
 no-op, and the file still needs `if __name__ == "__main__"` with a real call.
 
-| Test | Registration | Skip |
-| --- | --- | --- |
-| Kernel correctness on gfx95 | `register_amd_ci(est_time=..., stage="jit-kernel-unit", runner_config="amd")` | `torch.cuda.is_available() and is_hip() and is_gfx95_supported()` |
-| Selector / gate / fallback, no GPU | `register_cpu_ci(est_time=..., suite="base-a-test-cpu")` | none |
+Pick the suite from the hardware the test needs, not from the directory or a
+default. A test registered on a runner that fails its own `skipUnless` is
+skipped on every CI run, which is the same as having no test.
 
-`stage="jit-kernel-unit", runner_config="amd"` is the form new kernel tests
-use. It resolves to suite `jit-kernel-unit-test-amd`. The legacy
-`suite="jit-kernel-unit-test-amd"` still reaches that job; prefer the
-stage/runner form next to the other new files.
+`stage=..., runner_config=...` resolves to suite `{stage}-test-{runner_config}`.
+Look up that suite's `runs-on` in `.github/workflows/pr-test-amd.yml` (and
+`pr-test-amd-extra.yml`) at the PR head before accepting it:
+
+| Test needs | Registration | Runner (`runs-on`) |
+| --- | --- | --- |
+| Any HIP GPU, MI300 is fine | `register_amd_ci(est_time=..., stage="jit-kernel-unit", runner_config="amd")` | `linux-{mi300\|mi325}-1gpu-sglang` |
+| gfx95 (MI355X), 1 GPU | `register_amd_ci(est_time=..., stage="stage-b", runner_config="1-gpu-small-amd-mi35x")` | `linux-mi35x-gpu-1` |
+| gfx95 (MI355X), 8 GPU | `register_amd_ci(est_time=..., stage="stage-c", runner_config="large-8-gpu-amd-mi35x")` | `linux-mi35x-gpu-8` |
+| Selector / gate / fallback, no GPU | `register_cpu_ci(est_time=..., suite="base-a-test-cpu")` | CPU |
+
+AMD suites without `-mi35x` in the name run on `inputs.runner_arch`, whose
+choices are `mi300` and `mi325`; none of them reach gfx95. So a test guarded by
+`is_gfx95_supported()` must sit on a `-mi35x` suite, and a test on
+`jit-kernel-unit-test-amd` must not require gfx95. Match the neighbors in the
+same directory that already test gfx95 kernels. The legacy `suite="..."` string
+reaches the same job as the stage/runner pair; either is fine as long as the
+runner matches.
 
 The test has to hit the specialized shapes: constexpr heads, local K, and the
 M boundaries where the code switches back to BF16. A toy `N` that is not the
@@ -123,6 +136,7 @@ which modules exist.
 - Model-specific protocol stuffed into the generic unquantized method.
 - `import aiter` inside a forward or `apply`.
 - New kernel with no `test/registered/...` file, or a test that skips the real shape.
+- A gfx95-only test (`skipUnless(is_gfx95_supported())`) registered on a suite whose runner is MI300/MI325, so CI always skips it.
 - Type annotation removed to hide a second input kind.
 - Two copies of a threshold, a scale layout, or a module-name set that have to stay in sync.
 
