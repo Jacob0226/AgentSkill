@@ -21,5 +21,6 @@ This creates symlinks from `~/.cursor/skills/<skill-name>` to the corresponding 
 | `sglang-ci-repro` | Reproduce SGLang AMD CI failures locally on MI35x / MI325 boxes via `~/SGLang-benchmarks/tools/repro_ci.sh` (workflow → stage → suite → file mapping, partition handling, multimodal-gen edge case, aiter-version A/B) |
 | `GLM5.3-Flash` | GLM-5.3-Flash model architecture reference: hybrid KDA linear attention + MLA/DSA k-pool indexer, mHC 4-stream residual, 288-expert MoE, NoPE text tower, vision encoder, MTP |
 | `PR/sglang-pr` | Write an sgl-project/sglang PR body: Summary / Scope / Test plan, 100 words per section, detail in tables |
+| `PR/sglang-pr-review` | Review an SGLang PR for OOP, engineering, and repo conventions (AMD gates, kernel tests). Draft locally; do not post until approved |
 | `PR/aiter-pr` | Write a ROCm/aiter PR body: Motivation / Test Plan / Test Result, 100 words per section, detail in tables |
 | `standup-meeting` | Write daily standup notes (Last day / Today, grouped by ticket ID) |
