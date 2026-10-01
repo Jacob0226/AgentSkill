@@ -130,6 +130,30 @@ specializations, and why the sibling `EVEN_K` flag is *not* worth chasing.
 
 ---
 
+## Before running or reading an agentic (AgentX) benchmark
+
+Read [agentic-benchmark.md](agentic-benchmark.md). AgentX replays multi-turn
+1M-context sessions, so almost nothing carries over from a fixed-length sweep.
+The short version:
+
+- **"P90 Interactivity" is `1 / p90(TPOT)`**, not `p90(1/TPOT)` — the slow tail,
+  on purpose. AIPerf's `inter_token_latency` is the amortised TPOT formula; the
+  real per-token gap is `inter_chunk_latency` and goes unused. InferenceX emits
+  `itl` and `tpot` as byte-identical aliases.
+- **A 1200s window matches 3600s on interactivity (±0.6%) but under-reports
+  throughput by 14.5% and TTFT by 36%.** Iterate short, quote long, never mix
+  the two in one table.
+- **OOM *warnings* in `server.log` are normal**; only `Scheduler hit an
+  exception` is a failure. A healthy curve logs 4-28 warnings per point.
+- **Do not carry `--disable-radix-cache` over from a fixed-length recipe** —
+  cross-turn prefix reuse is the whole scenario. Hybrid linear-attention models
+  additionally need `--mamba-radix-cache-strategy extra_buffer` pinned.
+- **Count the full-attention layers before assuming HiCache is needed.**
+  GLM-5.3-Flash has 11 of 45, peaks at 9% KV pool usage, and needs no host tier
+  — while the upstream GLM-5.2 recipe enables one at *every* concurrency.
+
+---
+
 ## Target GPUs
 
 Two primary platforms. For detailed specs see [gpu-specs.md](gpu-specs.md).
