@@ -36,6 +36,17 @@ Tests to run against your own Motivation:
 Simple means fewer unexplained symbols, never vaguer claims. The measured-numbers rule below is
 not relaxed by this one.
 
+## Simple English
+
+Use simple English. Short sentences, common words, and say what you mean.
+
+Skip fancy wording and uncommon grammar. A rare word, or a clause stuffed inside another clause, hides the point. If a sentence needs a second read, split it or use a plainer word.
+
+| Avoid | Write |
+| --- | --- |
+| "This obviates the necessity of a separate kernel." | "This removes the need for a separate kernel." |
+| "The kernel, having been selected by a heuristic that assumes even M, then..." | "The heuristic assumes even M and picks a kernel. That kernel then..." |
+
 ## Favour the reviewer over the abstraction
 
 When a clean structure and an obvious diff pull apart, take the obvious diff. Reviewer attention
