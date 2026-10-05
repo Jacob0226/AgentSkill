@@ -172,3 +172,12 @@ Request changes / Comment / Approve — one sentence.
 Each finding names the symbol and the platform it affects (CUDA with the env
 unset, CUDA with the env set, gfx95 with aiter off). "Add a check" is not a
 finding; say which existing flag, at which call site.
+
+## Keep it short
+
+Every paste-ready comment, and the top-level review body, stays under 100
+words. One comment carries one finding: the symbol, what breaks on which
+platform, and the fix. Do not restate the PR, praise it, or hedge. Keep a table
+or a measurement if it carries the point, and cut the prose around it. If a
+finding does not fit in 100 words, split it or cut it. Do not repeat a point
+another reviewer already left inline; reference it in one line.
