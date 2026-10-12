@@ -164,6 +164,25 @@ silently replace a faster entry from another family.
 So: quote the incumbent's recorded `us` only to show *that the table disagrees with itself*,
 and always carry your own apples-to-apples measurement as the real evidence.
 
+## Never ship `hipblaslt` rows in a bf16 GEMM CSV
+
+Run `gemm_a16w16_tune.py` **without `--with-hipblaslt`**. A `hipblaslt` row stores a solution
+index (`solidx`) that only means something to the hipBLASLt build it was tuned on. In another
+docker the index can be missing or point at a different kernel, and the GEMM errors out.
+Maintainers reject these rows ([#5982](https://github.com/ROCm/aiter/pull/5982)), and the
+model CSVs carry almost none.
+
+The tuner's `torch` libtype is the safe stand-in. It calls `F.linear`, which lets hipBLASLt's
+own heuristic pick the kernel at runtime, so it stores no index and is exactly the untuned
+default. Two consequences:
+
+- A shape where only hipBLASLt beat the default has no shippable win. Keep a `torch` row (or
+  drop the shape) and say so in the Test Result, rather than pinning a `solidx`.
+- To pin "stock" for a shape whose neighbours have rows, write a `torch` row. Leaving the shape
+  out lets `get_padded_m` resolve it to a neighbour's row, which may be slower than stock.
+
+Before pushing, check: `grep -c ',hipblaslt,' <tuned csv>` must not grow.
+
 ## Worked example
 
 [#4453](https://github.com/ROCm/aiter/pull/4453), condensed. A pure-config PR — this is the
