@@ -12,9 +12,20 @@ description: >-
 
 # GLM-5.3-Flash 架構總覽
 
-官方定位：natively multimodal MoE，**320B total / 18B active**，1M context，FP8 權重
-（e4m3、weight_block_size 128×128）。SGLang 裡的 `model_type` 是 `glm5_next`，
-entry class `Glm5NextForConditionalGeneration`。
+官方定位：natively multimodal MoE，**320B total / 18B active**（HF 標 321.3B），1M context，
+FP8 權重（e4m3、weight_block_size 128×128）。SGLang 裡的 `model_type` 是
+`glm5_next`（text 部分是 `glm5_next_text`），entry class `Glm5NextForConditionalGeneration`。
+
+AMD 的 `amd/GLM-5.3-Flash-Quark-MXFP4` **不是全部 MXFP4**，是三種精度混在一起
+（從 checkpoint `quantization_config` 的 `exclude` / `layer_quant_config` 讀出來）：
+
+| 精度 | 模組 |
+|---|---|
+| **MXFP4**（W fp4 + A fp4 dynamic，group 32，e8m0 scale；global default） | layer 3–44 的 routed experts + shared expert |
+| **FP8 e4m3 block 128×128**（A dynamic per-group 128） | layer 0–2 的 dense MLP；11 層 MLA 的 `q_a_proj` / `kv_a_proj_with_mqa` / `q_b_proj` / `o_proj`；**整個 MTP layer 45**（含它的 experts 與 shared expert） |
+| **BF16**（`exclude`） | 34 層 KDA 的全部 projection 與 conv（q/k/v/b/f_a/f_b/g_a/g_b/o_proj）、42 層 router `mlp.gate`、indexer `wq_b` / `wk` / `weights_proj`、MLA `kv_b_proj`、`lm_head`、MTP 的 `eh_proj`、整個 vision tower |
+
+`hc_*` 是 fp32 `nn.Parameter`，不是 Linear，所以不在 `exclude` 裡也不會被量化。
 
 參考檔案（在 SGLang 原始碼裡）：
 
@@ -26,13 +37,22 @@ entry class `Glm5NextForConditionalGeneration`。
 | KDA linear attention backend | `python/sglang/srt/layers/attention/linear/kda_backend.py` |
 | DSA k-pool indexer | `python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py` |
 | mHC kernels | `python/sglang/kernels/ops/layernorm/mhc.py` |
+| mHC residual state（`MHCState`、`hc_expand` / `hc_contract` 的呼叫點） | `python/sglang/srt/layers/layer_boundary/residual/mhc.py` |
+| MTP draft 的 decoder layer | `python/sglang/srt/models/deepseek_nextn.py`（`DeepseekV2DecoderLayer`） |
+
+各文件引用程式碼時以 **函式 / class 名稱** 為準，行號會隨 rebase 漂移，所以不寫行號。
+
+**驗證基準**：image `rocm/sgl-dev:v0.5.21-rocm10-mi35x-20261012`（sglang `d1357bf87b`、
+aiter `e7d2453f2`），加上 `~/PR/wt-glm53-1012-prstack` 的 PR stack。哪些 PR 已在 image、
+哪些要自己疊，見 `serving-and-perf.md` 的「1012 image 與 PR stack」。
 
 ## 一句話描述
 
 45 層 text decoder，每 4 層一組：**3 層 KDA linear attention + 1 層 MLA/DSA sparse
-attention**；FFN 前 3 層是 dense MLP、其餘 42 層是 288-expert MoE；每一層的 residual
+attention**；FFN 前 3 層是 dense MLP、其餘 42 層是 288-expert MoE；這 45 層的 residual
 不是單一條而是 **4 條 parallel residual streams（mHC）**；整個 text tower **完全沒有
-RoPE**（NoPE），位置資訊只由 KDA 的 short conv + recurrence 提供。
+RoPE**（NoPE），位置資訊只由 KDA 的 short conv + recurrence 提供。另外有 1 層 MTP
+draft layer（layer 45），它 **沒有 mHC**，是單一 residual stream。
 
 ## 四個必須知道的設計
 
@@ -81,7 +101,10 @@ vision_config: depth 24, hidden 1024, heads 16, patch 14, image 448,
 | 3 | **KDA + MoE** | 4-6, 8-10, …, 44 | 31 |
 | — | MTP draft layer（layer 45，`nextn`） | 45 | 1 |
 
-MTP layer 不在 `kda_layers` 清單裡，所以它是 **MLA/DSA + MoE**。
+MTP layer 不在 `kda_layers` 清單裡，所以它是 **MLA/DSA + MoE**。但它不是用
+`Glm5NextDecoderLayer` 建的：`Glm5NextForConditionalGenerationNextN` 繼承
+`DeepseekV3ForCausalLMNextN`，draft layer 是 `DeepseekV2DecoderLayer`（`skip_rope=True`），
+**沒有 mHC**；checkpoint 的 `model.layers.45.*` 也沒有任何 `hc_*` 權重。
 
 ## 詳細文件
 
@@ -97,7 +120,8 @@ MTP layer 不在 `kda_layers` 清單裡，所以它是 **MLA/DSA + MoE**。
 
 - **看不到 RoPE kernel 不是 bug。** text tower 是 NoPE。看到 RoPE 只可能來自 vision encoder。
 - **`index_topk=2048` 不等於 attend 2048 個 token。** k-pool 選 512 個 pool 展開成 2048 個 history token，再無條件補上 `seq_len % 4` 個 tail token，輸出 buffer 寬度是 **2051**。
-- **11 層才有 indexer。** indexer 成本要除以 11（不是 45）。`index_topk_freq` 沒設（預設 1），所以 11 層各自跑完整 indexer，沒有 GLM-5.2 那種跨層共用。
-- **KDA 層沒有 KV cache。** 它用固定大小的 conv state + recurrent state，存在 `MambaPool` 而不是 KV pool。concurrency 常常是被 KDA state pool 卡住而不是 KV pool。
-- **residual 是 4 倍寬。** layer 之間 `residual=None`，一切折進 `[tokens, 4*hidden]` 的 hidden state；只有最後一層才 `hc_contract` 平均回 `[tokens, hidden]`。
-- **`gate_lower_bound=-5.0` 會關掉 KDA 的 fused decode 快路徑。** 不要為了效能去 override `linear_lower_bound`，那會改變數值。
+- **11 層才有 indexer。** indexer 成本要除以 11（不是 45）。checkpoint 的 `indexer_types` 45 個全是 `"full"`，`dsa_layer_skips_topk` 最先看這個欄位，所以 11 層各自跑完整 indexer，沒有 GLM-5.2 那種跨層共用。MTP layer 例外，它是 `skip_topk=True`。
+- **KDA 層沒有 KV cache。** 它用固定大小的 conv state + recurrent state，存在 `MambaPool` 而不是 KV pool。哪個 pool 先滿要看 context 長度和 `--mamba-full-memory-ratio`：短 context、高 concurrency 時常是 KDA state pool 先滿；長 context 的 agentic workload（ISL ~100K、`mamba-full-memory-ratio 0.5`）則是 KV pool 先滿，conc 64 時 `full token usage` 到 1.00、`mamba usage` 最高只有 ~0.38。
+- **residual 是 4 倍寬。** 45 層 text layer 之間的 hidden state 是 `[tokens, 4*hidden]`；最後一層之後才 `hc_contract` 平均回 `[tokens, hidden]`。MTP draft layer 沒有 mHC，吃的是 `[tokens, hidden]`。
+- **MoE 在 trace 裡是 289 個 expert、topk 9。** gfx950 TP4 上 shared expert 被併進 routed MoE（#41161 / #41870，已在 image），log 會印 `Shared experts fusion optimization enabled.`，aiter 的 key 是 `E=289, topk=9`。不要去找獨立的 shared expert GEMM。
+- **`gate_lower_bound=-5.0` 會關掉 KDA 的 packed decode。** `KDAAttnBackend.forward_decode` 只在 `layer.lower_bound is None` 或 decode kernel 有 `supports_packed_decode_safe_gate` 時走 `packed_decode`；後者只有 CUDA 的 Helion kernel，ROCm 的 `TritonKDAKernel` 沒有，所以 GLM-5.3 在 MI355X 上一律走 `fused_sigmoid_gating_delta_rule_update`。layer 讀的是 `linear_attn_config["gate_lower_bound"]`；頂層的 `linear_lower_bound` 只在 config 沒有 `linear_attn_config` 時才當 fallback，而兩份 checkpoint 都有 `linear_attn_config`，所以 override `linear_lower_bound` 沒有任何作用。不要為了效能去改 `gate_lower_bound`，那會改變數值。

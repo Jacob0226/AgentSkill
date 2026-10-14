@@ -1,8 +1,20 @@
 # mHC — 4 條 parallel residual stream
 
 `mhc=true, hc_mult=4, hc_sinkhorn_iters=20, hc_eps=1e-6`。
-程式碼裡的全名是 **Manifold-Constrained Hyper-Connections**
-（`python/sglang/srt/layers/communicator_mhc.py` 開頭的 docstring）。
+全名是 **Manifold-Constrained Hyper-Connections**。
+
+程式碼位置：
+
+| 內容 | 位置 |
+|---|---|
+| Residual stream 狀態（`MHCState`） | `srt/layers/layer_boundary/residual/mhc.py` |
+| `hc_attn_pre` / `hc_ffn_pre` / `hc_ffn_post_pre` / `hc_post` | `Glm5NextDecoderLayer`（`srt/models/glm5_next.py`） |
+| kernel dispatch、`hc_expand` / `hc_contract` | `kernels/ops/layernorm/mhc.py` |
+| attn→FFN boundary 融合 | `srt/models/deepseek_common/amd/deepseek_v4_fused_mhc.py` |
+| FFN all-reduce + `hc_post` 融合 | `srt/layers/layer_boundary/exit.py` |
+
+**MTP draft layer（layer 45）沒有 mHC**：它是 `DeepseekV2DecoderLayer`，單一 residual，
+checkpoint 也沒有 `model.layers.45.hc_*`。以下說的「每層」都是指 45 層 text layer。
 
 一般 transformer 的 residual 是一條：`x = x + f(norm(x))`。mHC 改成 **4 條 parallel
 residual stream**，每個 sublayer 用 learned、input-dependent 的 gate 決定
@@ -21,9 +33,11 @@ mixing matrix 還被 Sinkhorn 正規化成近似 doubly stochastic（這就是 m
 `ModelConfig.hc_hidden_size = hidden_size × hc_mult = 16384`，PP proxy tensor 和
 DP buffer 都用這個寬度。
 
-**重要**：mHC 模式下 layer 之間 `residual = None`，傳統的 residual tensor 被折進
-加寬的 hidden state。所以在 `Glm5NextModel.forward` 裡看到 `if residual is None:
-hidden_states = self.norm(hidden_states)` 走的就是 mHC 路徑。
+**重要**：mHC 模式下傳統的 residual tensor 被折進加寬的 hidden state。layer 之間的
+residual 由 `layer_boundary` 的 `residual_batch`（`ResidualStream`）管理，
+`Glm5NextModel.forward` 最後是 `residual_batch.complete_output` → `residual_batch.final_norm`；
+最後一層的 FFN write-back（`_FfnUpdate._finish`）已經做完 `hc_contract`，
+所以 final norm 拿到的是 `[s, 4096]`。
 
 ### 展開與收合
 
@@ -36,8 +50,9 @@ def hc_contract(x, n): # 最後一層之後：[s, 16384] -> [s, 4096]
     return x.unflatten(-1, (n, -1)).mean(dim=-2)   # 對 4 條取平均
 ```
 
-`hc_expand` 只在 `is_first_layer` 觸發，`hc_contract` 只在 `is_last_layer` 觸發。
-GLM 用的是純平均，**沒有** 載入 checkpoint 裡的 `hc_head` learned mixer。
+`hc_expand` 由第一層 readout 的 `init_residual` 觸發，`hc_contract` 在
+`MHCState.is_last_layer` 時由 `_FfnUpdate._finish` 觸發。
+GLM 用的是純平均，checkpoint 裡也沒有 `hc_head` 這類 learned mixer。
 
 ## 每層的參數（6 個 tensor）
 
@@ -121,16 +136,27 @@ residual stream [s,4H]
 residual stream [s,4H]  → 下一層
 ```
 
-所以 **一層 4 次 mHC 操作**（2 pre + 2 post），45 層共 180 次；
-`hc_attn_to_mlp` 融合之後在 gfx95 上是 3 次 kernel launch。
+所以 **一層 4 次 mHC 操作**（2 pre + 2 post），45 層共 180 次。
 
-`MHCState` 負責串起來（`communicator_mhc.py`）：
+在 AITER gfx950 上每個 `hc_pre` 本身是 **2 個 kernel**（`mhc_pre_gemm_sqrsum_kernel` +
+`mhc_pre_big_fuse_rmsnorm_kernel`），`hc_post` 是 1 個（`mhc_post`）。decode（≤ 16 token）
+實測的每層 kernel 數：
+
+| 設定 | attn pre | attn post + FFN pre | FFN all-reduce + post | 每層 mHC kernel |
+|---|---|---|---|---|
+| 沒融合 | 2 | 1 + 2 | AR + 1 | 6（+ AR） |
+| boundary 融合（image 預設） | 2 | **2**（`mhc_fused_post_pre_gemm_sqrsum_kernel` + `mhc_pre_big_fuse_rmsnorm_kernel`） | AR + 1 | 5（+ AR） |
+| 再加 #42020（`SGLANG_ROCM_FUSED_AR_MHC_POST=1`） | 2 | 2 | **1**（`allreduce_mhc_post_large_m_kernel`） | 5（AR 也併進去） |
+
+`MHCState`（`layer_boundary/residual/mhc.py`）負責串起來：
 
 | method | 做什麼 |
 |---|---|
-| `attn_split` | `hc_expand`（layer 0）+ `hc_attn_pre` |
-| `attn_to_mlp` | `hc_post(attn)` + `hc_ffn_pre`（gfx95 融合成 `hc_attn_to_mlp`） |
-| `mlp_combine` | `hc_post(ffn)`，最後一層再 `hc_contract` |
+| `_AttnReadout.init_residual` | 第一層 `hc_expand` |
+| `read_attn_input` | `hc_attn_pre`（+ input_layernorm） |
+| `update_and_read_ffn_input` | `hc_post(attn)` + `hc_ffn_pre`；先試 `hc_ffn_post_pre` 融合，回 `None` 才拆開跑 |
+| `apply_post` | `hc_post(ffn)`；最後一層由 `_FfnUpdate._finish` 再 `hc_contract` |
+| `reduce_and_apply_post` | FFN TP all-reduce + `hc_post` 同一個 kernel（見下方「通訊」） |
 
 ## Kernel dispatch
 
@@ -145,13 +171,21 @@ residual stream [s,4H]  → 下一層
 Dispatch 函式上有 `@torch._dynamo.disable`，**不走 torch.compile**。
 啟用 AITER 時 log 會印 `Using AITER gfx950 mHC pre/post kernels`。
 
-AMD gfx95 的 attn→FFN 邊界融合（`apply_mhc_post_pre_boundary`）：
-`aiter.ops.mhc.mhc_fused_post_pre` → 退到 `aiter.ops.triton.fusions.mhc.mhc_post_pre`
-（只在 ≤ 64 token 時觸發）→ 再退到未融合的 `hc_post` + `hc_pre`。
-第一次成功時會 log `Using fused AITER mHC attention-to-FFN boundary`。
+attn→FFN 邊界融合：只有 `is_cross_layer_mhc_fusion_enabled()` 為真時，`MHCState` 才會拿到
+`hc_ffn_post_pre`；它在 HIP + gfx95 + `SGLANG_USE_AITER=1`（或 CUDA 上
+`SGLANG_OPT_FUSE_MHC_POST_PRE` + TileLang pre/post）時成立，所以 MI355X 上預設就開。
+`Glm5NextDecoderLayer.hc_ffn_post_pre` 在 token 數
+> `_MHC_FUSED_BOUNDARY_MAX_TOKENS = 16` 時直接回 `None`（16 token 以內融合較快，24 持平），
+否則呼叫 `apply_mhc_post_pre_boundary`，順序是：
+`try_aiter_fused_mhc_post_pre`（aiter HIP）→ `try_fused_hc_post_pre`（Triton，
+`_FUSED_HC_POST_PRE_M_THRESHOLD = 64`）→ TileLang `mhc_fused_post_pre` →
+都不行就回 `None`，由 `update_and_read_ffn_input` 跑未融合的 `hc_post` + `hc_ffn_pre`。
+這條路徑沒有專屬 log，要從 trace 看 kernel 名稱判斷。
 
-融合的內容：`hc_post(attn)` 的 scatter/mix、`hc_ffn_pre` 的 RMS + GEMM + Sinkhorn +
-gate、以及 `post_attention_layernorm`，全部在一個 kernel 裡。
+融合的內容：`hc_post(attn)` 的 scatter/mix 併進 `hc_ffn_pre` 的 RMS + mixing GEMM
+（`mhc_fused_post_pre_gemm_sqrsum_kernel`）；Sinkhorn + gate + `post_attention_layernorm`
+仍是另一個 `mhc_pre_big_fuse_rmsnorm_kernel`。**是 3 個 kernel 變 2 個，不是 1 個**
+（`hc_ffn_post_pre` 的註解："two launches instead of three"）。
 
 ## 成本
 
@@ -176,15 +210,25 @@ gate、以及 `post_attention_layernorm`，全部在一個 kernel 裡。
 
 原因是 all-reduce 發生在 module 輸出（`[s,H]`）上，`hc_post` 才把它散進 4 條 stream。
 只有跨 layer / 跨 PP stage 搬 residual stream 時才是 4 倍。
-`get_local_dp_buffer_mhc(group, n)` 的 `n` 在非最後一層是 `hc_mult=4`、
-最後一層（已 contract）是 1。
+
+### FFN all-reduce + `hc_post` 融合（ROCm，PR #42020，預設關）
+
+**這是 #42020 加的，1012 image 沒有**（image 裡搜不到 `SGLANG_ROCM_FUSED_AR_MHC_POST`），
+要疊 PR stack 才有。`SGLANG_ROCM_FUSED_AR_MHC_POST=1`（且 `SGLANG_USE_AITER=1`）時，FFN 的 TP all-reduce
+和 `hc_post(ffn)` 合成一個 kernel（`group.fused_allreduce_mhc_post` → aiter
+`fused_allreduce_mhc_post_only`，trace 裡是 `allreduce_mhc_post_large_m_kernel`，經
+`MHCState.reduce_and_apply_post`）。條件由 `ExitPolicy._fuses_all_reduce_into_mhc_post` 判斷：
+TP > 1、沒有 DP attention、沒有 MoE a2a、post-experts sum 是單一 all-reduce，且 batch
+在 `_FUSED_AR_MHC_POST_MAX_TOKENS = 16` token 以內（decode）。kernel 拒絕時退回
+`all_reduce` + `hc_post`。
 
 ## Debug 提示
 
-- 看到 `residual is None` 一路傳到底是正常的，不是 bug。
-- `hc_*` 參數是 **fp32**，即使模型是 FP8 量化的。它們列在 `modules_to_not_convert` 裡。
-- 想確認 AITER 融合有沒有生效，grep server log 的
-  `Using fused AITER mHC attention-to-FFN boundary` 和
-  `Using AITER gfx950 mHC pre/post kernels`。
+- `hc_*` 參數是 **fp32**，即使模型是 FP8 / MXFP4 量化的。官方 FP8 ckpt 把它們列在
+  `modules_to_not_convert` 裡。
+- 想確認 AITER mHC pre/post 有沒有生效，grep server log 的
+  `Using AITER gfx950 mHC pre/post kernels`（每個 TP rank 印一次）。boundary 融合和
+  AR + `hc_post` 融合沒有 log，要看 trace：有 `mhc_fused_post_pre_gemm_sqrsum_kernel` 就是
+  boundary 融合生效，有 `allreduce_mhc_post_large_m_kernel` 就是 #42020 生效。
 - DFLASH / EAGLE3 的 aux hidden state capture 需要先 `hc_contract` 才能用
   （`_prepare_aux_hidden_state`），否則維度會是 4 倍。

@@ -1,9 +1,9 @@
 # DSA k-pool lightning indexer（11 / 45 層）
 
 只有 `layer_types[i] == "deepseek_sparse_attention"` 的 11 層（3, 7, 11, …, 43）
-加上 MTP layer 45 有 indexer。實作類別是 `IndexerKPool`
+加上 MTP layer 45 有 indexer（`model.layers.45.self_attn.indexer.*` 權重都在）。實作類別是 `IndexerKPool`
 （`layers/attention/dsa/dsa_indexer_kpool.py`），選用邏輯在
-`models/deepseek_v2.py:1853`：
+`DeepseekV2AttentionMLA.__init__`（`models/deepseek_v2.py`）：
 
 ```python
 indexer_cls = IndexerKPool if get_dsa_index_kpool(config) > 1 else Indexer
@@ -70,7 +70,7 @@ tail_count = seq_len % POOL_SIZE       # 0..3
 topk_result = torch.empty((token_nums, self.index_topk + tail_pool), dtype=torch.int32)
 ```
 
-`get_dsa_mtp_topk_width()`（`configs/model_config.py:284`）也回傳 2051，
+`get_dsa_mtp_topk_width()`（`configs/model_config.py`）也回傳 2051，
 MTP 的 IndexShare seed buffer 用這個寬度。
 
 ### 數字追蹤
@@ -83,7 +83,7 @@ MTP 的 IndexShare seed buffer 用這個寬度。
 | tail 補上 | `seq_len % 4` = 0~3 個最新 token |
 | **實際 attend 的 KV** | **最多 2051 個 token**（不是 8192） |
 
-`compute_dsa_seqlens`（`dsa/utils.py:87`）算 attention metadata 時用同樣的契約：
+`compute_dsa_seqlens`（`layers/attention/dsa/utils.py`）算 attention metadata 時用同樣的契約：
 history 部分向下對齊到 pool 邊界、clamp 到 `index_topk`、再加回 tail。
 
 ## Q / K 的投影鏈
@@ -92,7 +92,7 @@ history 部分向下對齊到 pool 邊界、clamp 到 `index_topk`、再加回 t
 |---|---|
 | Q | `wq_b(q_lora)` → bf16，reshape `[L, 32, 128]` |
 | K | `wk(x)` → `LayerNorm(128, dtype=fp32)` → bf16 |
-| **RoPE** | **完全跳過**。`skip_rope=True`（`glm5_next.py:668`）且 `qk_rope_head_dim=0` |
+| **RoPE** | **完全跳過**。`Glm5NextDecoderLayer` 建 MLA 時傳 `skip_rope=True`，且 `qk_rope_head_dim=0` |
 | Hadamard | 只在 **Q** 上做一次（`rotate_activation`，在 `act_quant` 前）。K 的 Hadamard 在 pooling kernel 內部 |
 | Q 量化 | `act_quant(query, block_size=128, scale_fmt="ue8m0")` → FP8 e4m3 |
 | Head gate | `weights_proj(x).float() * n_heads**-0.5 * q_scale * head_dim**-0.5` |
@@ -107,11 +107,14 @@ GLM-5.3-Flash 的 K Hadamard 融進了 pooling kernel，所以獨立的 Hadamard
 `skip_rope` 的傳遞鏈：
 
 ```
-glm5_next.py:668          skip_rope=True   →  DeepseekV2AttentionMLA
-deepseek_v2.py:1876       indexer_kwargs["skip_rope"] = skip_rope
-deepseek_v2.py:1901       if not skip_rope and qk_rope_head_dim > 0:  →  rotary_emb = None
-dsa_indexer_kpool.py:684  if not self.skip_rope:                      →  整段 RoPE 跳過
+glm5_next.py          Glm5NextDecoderLayer:   DeepseekV2AttentionMLA(..., skip_rope=True)
+deepseek_v2.py        DeepseekV2AttentionMLA: indexer_kwargs["skip_rope"] = skip_rope
+deepseek_v2.py        DeepseekV2AttentionMLA: if not skip_rope and qk_rope_head_dim > 0:  →  rotary_emb = None
+dsa_indexer_kpool.py  IndexerKPool:           if not self.skip_rope:                      →  整段 RoPE 跳過
 ```
+
+MTP draft layer 走 `DeepseekV3ForCausalLMNextN`，它用 `skip_rope=config.qk_rope_head_dim == 0`
+建 `DeepseekV2DecoderLayer`，結果一樣是 NoPE。
 
 而且 `is_mrope_enabled` 需要 `rope_scaling` 裡有 `mrope_section`，
 GLM-5.3-Flash 的 config 沒有 `rope_scaling`，所以連 mrope 都不啟用。
@@ -147,18 +150,23 @@ if forward_batch.forward_mode.is_extend_without_speculative():
 
 ## 每層各自算，沒有跨層共用
 
-`index_topk_freq` 在 config.json **沒有設定**，parser 預設 1。
-`configs/model_config.py:260` 的判斷：
+`dsa_layer_skips_topk`（`configs/model_config.py`）依序看：
 
-```python
-freq = getattr(config, "index_topk_freq", 1)
-return max(layer_id - 1, 0) % freq != 0      # freq=1 → 永遠 False → skip_topk=False
-```
+1. `indexer_types`：有這個欄位就只看它，`indexer_types[layer_id] == "shared"` 才 skip。
+2. `cli_factor > 1`（LongCat）。
+3. `index_topk_pattern` 含 `"S"`。
+4. `index_topk_freq`（預設 1）與 `index_skip_topk_offset`。
+
+GLM-5.3-Flash 的 checkpoint 有 `indexer_types`，45 個全是 `"full"`，所以在第 1 步就決定
+`skip_topk=False`，後面的 `index_topk_freq` 根本不會被看到。
 
 所以 11 層 DSA **每層都跑完整 indexer**，沒有 GLM-5.2 那種
 「full layer 算 top-k、shared layer 重用」的機制（GLM-5.2 是 `index_topk_freq=4`，
-78 層裡只有 21 層算）。跨層共用只在 `index_topk_freq > 1` 或
-`index_topk_pattern` 含 `"S"` 時啟用。
+78 層裡只有 21 層算）。
+
+MTP draft layer 例外：`DeepseekV2AttentionMLA` 在 `is_nextn=True` 時固定
+`skip_topk = next_skip_topk = True`，但仍然建 indexer（`if not self.skip_topk or is_nextn`），
+配合下面的 `index_share_for_mtp_iteration`。
 
 **估算 indexer 成本時要除以 11，不是 45。**
 
@@ -181,22 +189,41 @@ return max(layer_id - 1, 0) % freq != 0      # freq=1 → 永遠 False → skip_
 
 | 變數 | 預設 | 作用 |
 |---|---|---|
-| `SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION` | `0` | 融合 kpool metadata refresh；需要 `page_size=64` 且 topk 對齊 pool |
+| `SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION` | `True` | 融合 kpool metadata refresh；`kpool_metadata_fusion_supported` 要求 `page_size == 64` 且 topk 對齊 pool，**而且只在 CUDA 生效**（`is_cuda() and not is_hip()`）。ROCm 上一律印 `DSA KPool metadata fusion unsupported for this platform/geometry; retaining ordinary metadata`，不是 bug |
 | `SGLANG_DSA_KPOOL_DEBUG_BOUNDS` | unset | 設 `"1"` 做 write plan 的 bounds check |
-| `SGLANG_DSA_FUSE_TOPK` | `1` | 融合 page-table top-k transform |
-| `SGLANG_DSA_HIP_DISABLE_PRESHUFFLE` | `0` | 關掉 AITER preshuffle paged-MQA（ROCm k-pool 需要 preshuffle） |
-| `SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA` | `0` | 把 verify write-plan 收進 CUDA graph |
+| `SGLANG_DSA_FUSE_TOPK` | `True` | 融合 page-table top-k transform |
+| `SGLANG_DSA_HIP_DISABLE_PRESHUFFLE` | `False` | 關掉 AITER preshuffle paged-MQA（ROCm k-pool 需要 preshuffle） |
+
+（舊版文件列的 `SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA` 已不存在。）
 
 ### 一般 DSA（同樣影響 k-pool）
 
 | 變數 / flag | 作用 |
 |---|---|
-| `--dsa-prefill-backend` / `--dsa-decode-backend` | `tilelang` / `aiter` / `trtllm`；k-pool 的 tail indices **只有 FA3 / TileLang / TRTLLM sparse decode backend 支援** |
+| `--dsa-prefill-backend` / `--dsa-decode-backend` | `tilelang` / `triton` / `aiter_sparse_mla` / `aiter` / `trtllm` …；k-pool 的 tail indices 只有 FA3 / TileLang / TRTLLM，以及通過 `can_use_glm53_triton_sparse_attention` 檢查的 `triton` / `aiter_sparse_mla` 支援（`_check_kpool_tail_backend`） |
 | `--dsa-topk-backend` | `topk_transform` 的實作（`sgl-kernel` / `torch` / `flashinfer`） |
-| `SGLANG_DSA_TRITON_PREFILL` | prefill 用 Triton kernel |
-| `SGLANG_DSA_MQA_LOGITS_FREE_MEM_FRACTION` | logits chunking 的 OOM 門檻 |
-| `SGLANG_DSA_TOPK_BROADCAST` | 由 rank 0 broadcast 最終 top-k |
-| `SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD` | 預設就是 `index_topk` = 2048；短於此走 dense attention |
+| `SGLANG_DSA_MQA_LOGITS_FREE_MEM_FRACTION` | logits chunking 的 OOM 門檻（預設 0.2） |
+| `SGLANG_DSA_TOPK_BROADCAST` | 由 rank 0 broadcast 最終 top-k（預設 False） |
+| `SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD` | 預設 2048（= `index_topk`）；短於此走 dense attention |
+
+（舊版文件列的 `SGLANG_DSA_TRITON_PREFILL` 已不存在。）
+
+### MI355X 的 sparse MLA backend
+
+目前 MI355X recipe（1012 image + PR stack）用的是
+`--dsa-prefill-backend triton --dsa-decode-backend triton`，舊的 recipe 是 `tilelang`。
+
+| backend | 來源 | kernel | 說明 |
+|---|---|---|---|
+| `tilelang` | image 內建 | TileLang sparse MLA | 舊 recipe |
+| `triton` | image 內建，#41615 調過 | sglang 的 `triton_sparse_mla.py` / `triton_sparse_mla_decode.py`；trace 裡是 `_sparse_mla_decode_split_kernel` + `_sparse_mla_reduce_kernel` | #41615 把 GLM-5.3 換到這條（TTFT -10%） |
+| `aiter_sparse_mla` | **#41615 新增**，image 沒有 | decode ≥ 16 token（`_GLM53_AITER_DECODE_MIN_TOKENS`）、prefill ≤ 256 token（`_GLM53_AITER_PREFILL_MAX_TOKENS`）走 aiter `aiter.ops.triton.attention.sparse_mla.sparse_mla_fwd`（gfx950 Gluon），其餘 fallback 到 `triton` | 只驗證過 GLM-5.3 gfx950、BF16 Q/KV、8 或 16 個 query head、topk 2048、kpool 4 |
+
+aiter#6276（gfx950 `sparse_mla` rope-free walk 的 bf16 KV-tile store 去 bank conflict）
+**只影響 `aiter_sparse_mla`**，跑 `triton` 時用不到；而且它不在 1012 image 的 aiter 裡。
+
+ROCm decode 的 indexer kernel 在 trace 裡叫 `_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle`
+（logits）和 `kpool_topk_transform_kernel<512>`（top-k），每個 decode step 各 11 次。
 
 啟動 log 會印：`Set dense attention kv len threshold to model index_topk=2048 for
 DeepSeek with DSA.`

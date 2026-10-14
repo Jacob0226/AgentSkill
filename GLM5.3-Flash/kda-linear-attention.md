@@ -1,6 +1,6 @@
 # KDA linear attention（34 / 45 層）
 
-`Glm5NextLinearAttention`（`models/glm5_next.py:326-606`）。KDA = Kimi Delta Attention
+`Glm5NextLinearAttention`（`models/glm5_next.py`）。KDA = Kimi Delta Attention
 風格的 **gated delta rule** linear attention。
 
 ```
@@ -40,21 +40,65 @@ bottleneck 只有 **128 維、所有 head 共用**，head-specific 的展開在
 
 ### Fused 路徑
 
-當 `quant_config is None and head_shard_size == tp_size` 時（`do_fuse_qkvbfg=True`），
-6 個 projection 合成 2 個 kernel：
+`Glm5NextLinearAttention._can_fuse_proj` 決定 layout，由寬到窄三種：
+
+| 條件 | in-proj 的 module | in-proj GEMM | 加 `o_proj` |
+|---|---|---|---|
+| `do_fuse_qkvbfg`：q/k/v/b/f/g 全部可 fuse | `fused_qkvbfg_a_proj`（q, k, v, b, f_a, g_a）+ `fused_fg_b_proj`（f_b, g_b） | 2 | 3 |
+| `fuse_bfg`：qkv 不行，但 b/f/g 可以 | `qkv_proj` + `fused_bfg_a_proj`（b, f_a, g_a）+ `fused_fg_b_proj` | 3 | 4 |
+| 都不行 | `qkv_proj`、`b_proj`、`f_a_proj`、`f_b_proj`、`g_a_proj`、`g_b_proj` 各自一個 | 6 | 7 |
 
 ```python
 self.fused_qkvbfg_a_proj = MergedColumnParallelRepeatedLinear(
     hidden_size,
     [8192, 8192, 8192, 64],   # column-parallel: q, k, v, beta
     [128, 128],               # replicated:      f_a, g_a
+    quant_config=None,
 )
 self.fused_fg_b_proj = ColumnParallelBatchedLinear(2, 128, 8192)  # f_b 與 g_b 一起 batched
 ```
 
 `MergedColumnParallelRepeatedLinear` 的特點是同一個權重矩陣裡混了「要 TP 切」和
-「要 replicate」兩種 partition。GLM-5.3-Flash 官方 ckpt 是 FP8 量化的，所以
-`quant_config` 不是 None → **實際跑的是 unfused 路徑**（除了 BF16 ckpt 的情況）。
+「要 replicate」兩種 partition。fused module 一律用 `quant_config=None` 建，也就是
+BF16 GEMM，所以「可 fuse」的意思是 **checkpoint 把這些 projection 留在 BF16**：
+
+- 開了 LoRA → 不 fuse。
+- `quant_config is None`（BF16 ckpt）→ fuse。
+- 否則 quant method 必須在 `{fp8, mxfp8, modelopt_fp8, modelopt_fp4, modelopt_mixed, quark}`
+  裡，而且每個來源 projection 都沒被量化（被 ignore / exclude，保留原精度），判斷方式是
+  `quant_config.is_linear_unquantized(prefix)`。只要有一個被量化就退回下一種 layout。
+- `quark` 是 #41870（merge commit `af1bef3eaf`，已在 1012 image 裡）加進名單的，更舊的 tree 不會 fuse；
+  `amd/GLM-5.3-Flash-Quark-MXFP4` 把這些 projection 全部 exclude 成 BF16，所以合併後走
+  第一種 layout（7 → 3 個 GEMM）。Quark 的 `get_quant_method` 會把沒被 exclude 的 prefix
+  登記成 online-quantized layer，因此 `QuarkConfig.is_linear_unquantized` 直接查
+  exclude list，不去呼叫它。
+
+fused in-proj 在 MI355X 上是 aiter 的 BF16 hgemm（trace 裡的 `hgemm_bf16_t16x16x128...`），
+TP4 的 tuning 在 aiter#5982（`glm53_flash_bf16_tuned_gemm.csv`）。這個 PR 在 aiter 已 merge，
+但 1012 image 的 aiter（`e7d2453f2`）還沒有，要手動把 CSV 複製到
+`aiter/configs/model_configs/`（`~/SGLang-benchmarks/tmp/agentic_1014/run_triton.sh` 有做）。
+
+3 個 GEMM 是資料相依的下限：`fused_fg_b_proj` 要等 f_a / g_a 的 128 維輸出，
+`o_proj` 要等 recurrence 和 `o_norm`。`f_b(f_a(x))` 中間沒有非線性，理論上可以把
+low-rank 預先乘開併進第一個 GEMM，但每 rank 每層權重會從約 3 MB 變約 34 MB，
+decode 多讀的頻寬抵掉省下的那次 launch。
+
+### PTPC FP8 projection（PR #38764，opt-in，1012 image 沒有）
+
+`SGLANG_OPT_GLM53_KDA_PTPC_MODULES`（逗號分隔，可選 `qkv_proj`、`f_a_proj`、`g_a_proj`、
+`o_proj`）讓 BF16 的 KDA projection 在 **大 M（prefill）** 時改走 per-token-per-channel FP8 GEMM，
+小 M 仍是 BF16，所以只影響 TTFT：
+
+| 條件 | 行為 |
+|---|---|
+| 不是 AITER gfx950 | 設了就 raise |
+| `qkv_proj` / `f_a_proj` / `g_a_proj` | 必須三個一起選（共用同一份 activation quant） |
+| fused layout（Quark ckpt） | `Glm53KdaPackedPtpcLinearMethod`；TP4（每 rank qkv 6144）M ≤ 4095 走 BF16，4096 ≤ M ≤ 16384 走 FP8，更大回 BF16 |
+| `o_proj` | 只在每 rank K ∈ {1024, 2048}（TP8 / TP4）；M ≤ 5631 走 BF16 |
+| `o_norm` + FP8 quant 融合 | `rms_norm_gated_per_token_fp8`，K=2048 時 M ≥ 256、K=1024 時 M ≥ 1 |
+
+mHC 的 `hc_attn_pre` 也可以直接吐出 FP8 activation 給 PTPC 用（`can_consume_mhc_prequant`）。
+目前 agentic recipe 設的是 `SGLANG_OPT_GLM53_KDA_PTPC_MODULES=qkv_proj,f_a_proj,g_a_proj,o_proj`。
 
 ## Recurrence 數學
 
@@ -68,7 +112,7 @@ pool 裡存成 `[local_heads, 128, 128]`。
 g_k = \text{lower\_bound} \cdot \sigma\!\big(e^{A_{\log}} \cdot (a_k + \text{dt\_bias}_k)\big)
 \]
 
-程式碼（`kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py:191-207`）：
+程式碼（`kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py`，`USE_LOWER_BOUND` 分支）：
 
 ```python
 x = b_a + b_dt_bias
@@ -119,10 +163,22 @@ TP4（`local_heads = 16`）、dtype 用預設（conv bf16、state fp32）：
 |---|---|---|
 | conv state | `(3, 6144)` bf16 | 36,864 B |
 | recurrent state S | `(16, 128, 128)` fp32 | 1,048,576 B |
-| **每層合計** | | **≈ 1.08 MiB** |
-| **× 34 KDA 層** | | **≈ 36.8 MiB / sequence / rank** |
+| **每層合計** | | **1,085,440 B ≈ 1.04 MiB** |
+| **× 34 KDA 層** | | **≈ 35.2 MiB（36.9 MB）/ sequence / rank** |
 
 TP1 的話是 `(3, 24576)` + `(64,128,128)` → 每層 ≈ 4.14 MiB、34 層 ≈ 141 MiB。
+
+**開 MTP / speculative 時還有兩塊額外的 state**，啟動 log 的
+`Mamba Cache is allocated.` 那行會列出來：
+
+- `intermediate_ssm_state_cache`：`[34 層, spec_state_size + 1, num_draft_tokens, 16, 128, 128]`
+  fp32，給 verify 時每個 draft token 的 state 用，跟 running request 數和 draft token 數成正比。
+- `intermediate_conv_window_cache`：conv 版的同一件事，小很多。
+
+實測（TP4、EAGLE 5 steps / 6 draft tokens、`--mamba-full-memory-ratio 0.5`、
+`--mamba-radix-cache-strategy extra_buffer`）：`max_mamba_cache_size: 841, conv_state 1.01GB,
+ssm_state 28.78GB, intermediate_ssm_state_cache 16.61GB, intermediate_conv_window_cache 0.58GB`。
+也就是 spec 用的 intermediate cache 大約是主 state 的 6 成，估算 KDA pool 時不能漏掉。
 
 **這是固定值，跟 sequence length 完全無關。** 對比 11 層 MLA 的 paged KV：
 `kv_lora_rank + qk_rope_head_dim = 512 + 0 = 512` 個元素 / token / layer，
@@ -137,9 +193,13 @@ dtype 可由 `SGLANG_MAMBA_CONV_DTYPE` / `SGLANG_MAMBA_SSM_DTYPE` 調整。
 
 `Glm5NextLinearAttention` → `RadixLinearAttention` → `HybridLinearAttnBackend`
 （按 `layer_id` 分流）→ `KDAAttnBackend`。註冊在
-`layers/attention/attention_registry.py:503`，ROCm 上預設 `--linear-attn-backend triton`。
+`layers/attention/attention_registry.py`，ROCm 上預設 `--linear-attn-backend triton`
+（kernel 在 `layers/attention/linear/kernels/kda_triton.py`）。
 
 ### Prefill / extend（chunked，chunk size 64）
+
+（#39121 "Tune GLM-5.3-Flash KDA prefill kernels on gfx950" 已 **closed、沒有 merge**，
+1012 image 和 PR stack 都沒有，下表是 upstream 的 kernel。）
 
 | 步驟 | kernel |
 |---|---|
@@ -157,19 +217,32 @@ dtype 可由 `SGLANG_MAMBA_CONV_DTYPE` / `SGLANG_MAMBA_SSM_DTYPE` 調整。
 | 1 | `causal_conv1d_update` |
 | 2 | `fused_sigmoid_gating_delta_rule_update` |
 
-**注意**：因為 `gate_lower_bound = -5.0` 不是 None，`supports_packed_decode` 的
-快路徑被關掉（`layers/attention/linear/kda_backend.py:557`），所以跑不到
-`fused_recurrent_kda_packed_decode_kernel`，CUDA-only 的 `kda_fused_decode`
-（conv + recurrence + o_norm 一個 kernel）也用不到。這是 checkpoint 的數值要求，
-**不要為了效能去 override `linear_lower_bound`**。
+**注意**：`KDAAttnBackend.forward_decode` 的條件是
+`supports_packed_decode and (layer.lower_bound is None or supports_packed_decode_safe_gate)`，
+成立才走 `kernel_dispatcher.packed_decode`（`fused_recurrent_kda_packed_decode`）。
+`supports_packed_decode_safe_gate` 只有 CUDA 的 `kda_helion.py` 設成 True，ROCm 的
+`TritonKDAKernel` 沒有；GLM-5.3 的 `gate_lower_bound = -5.0`，所以在 MI355X 上一律走上表的
+`fused_sigmoid_gating_delta_rule_update`（1012 trace 每 decode step 34 次）。
+
+另外兩條「fully fused decode」（conv + recurrence + o_norm 一個 kernel）——CUDA 的
+`kda_fused_decode` 和 gfx95 的 `kda_fused_decode_aiter_hip`——只有在 model 設了
+`layer._k3_fused_decode_args` / `_k3_hip_fused_decode_args` 時才會走，而這些只有
+`kimi_k3.py` 會設，**GLM-5.3 不管 bound 是多少都用不到**。
+
+`Glm5NextLinearAttention` 讀的是 `linear_attn_config["gate_lower_bound"]`；
+config 頂層的 `linear_lower_bound` 只在沒有 `linear_attn_config` 時當 fallback，兩份
+checkpoint 都有 `linear_attn_config`，所以 **override `linear_lower_bound` 沒有任何作用**。
+`gate_lower_bound` 是 checkpoint 的數值要求，不要為了效能去改。
 
 MTP / verify 用同一個 `fused_sigmoid_gating_delta_rule_update`，但帶
 `disable_state_update=True`。
 
 ## ROCm / AITER
 
-**KDA 路徑沒有 AITER 或 ROCm 原生 kernel**，全部走
+**GLM-5.3 的 KDA conv / recurrence / `o_norm` 沒有用到 AITER 或 ROCm 原生 kernel**，全部走
 `python/sglang/kernels/ops/attention/fla/` 下的 Triton kernel（Triton 在 ROCm 上可用）。
+AITER 只出現在 projection GEMM（BF16 hgemm、#38764 的 PTPC FP8 GEMM）。
+repo 裡雖然有 `kda_fused_decode_aiter_hip`，但只接在 `kimi_k3.py` 上（見上一節）。
 `SGLANG_USE_AITER=1` 影響的是 DSA MLA 的 KV layout 和 MoE / mHC，不是 KDA recurrence。
 
 CUDA-only 的加速選項（ROCm 用不到）：`flashkda`、`cutedsl`、`nvidia_kda`、`ptx_kda`、
@@ -177,7 +250,7 @@ CUDA-only 的加速選項（ROCm 用不到）：`flashkda`、`cutedsl`、`nvidia
 
 ## Hybrid memory pool
 
-`HybridLinearKVPool`（`mem_cache/memory_pool.py:3710`），由
+`HybridLinearKVPool`（`mem_cache/memory_pool.py`），由
 `KVCacheConfigurator._build_hybrid_linear_kv_pool` 建起來：
 
 | 子 pool | 負責的層 | 儲存模型 | backend |
@@ -192,6 +265,8 @@ KDA 的 state 要透過 `req_to_token_pool.mamba2_layer_cache(layer_id)` 取。
 實務影響：**兩個 pool 各自有 capacity，concurrency 取兩者較小值。**
 啟動時如果 log 說 `max_running_requests` 被調降，通常是 KDA state pool 不夠，
 用 `--mamba-full-memory-ratio` 或 `--max-mamba-cache-size` 加大。
+反過來，長 context 的 agentic workload（ISL ~100K、ratio 0.5）是 KV pool 先滿：
+conc 64 時 `full token usage` 到 1.00，`mamba usage` 最高只有 ~0.38。
 
 ## 資料流總結
 
