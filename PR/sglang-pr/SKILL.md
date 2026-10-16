@@ -224,22 +224,29 @@ git -c user.name="Jacob0226" -c user.email="jacchang@amd.com" commit -F - <<'EOF
 EOF
 git push origin jacob/<topic>
 gh pr create --repo sgl-project/sglang --draft --base main \
-    --head Jacob0226:jacob/<topic> --title "[AMD] ..." --body "$(cat <<'EOF'
+    --head Jacob0226:jacob/<topic> --title "[Perf] [AMD] <scope>: ..." --body "$(cat <<'EOF'
 ...
 EOF
 )"
 ```
 
-The commit message carries the long-form reasoning the 100-word sections cannot. Title starts
-with `[AMD]`, plus `[gfx95]` when the change is gated on the architecture.
+The commit message carries the long-form reasoning the 100-word sections cannot.
+
+**The title must pass the required `PR title` check:** `[Type] [AMD] scope: Title`.
+
+- Type is one of `Feat`, `Fix`, `Refactor`, `Perf`, `Doc`, `Test`, `CI`, `Chore`.
+- Put exactly one space between the tags and after the colon.
+- Use one uppercase hardware tag at most. `[AMD][gfx95]` fails; say gfx950 in the body.
+- The scope is a single token of letters, digits and `._/-` (e.g. `GLM-5.3-Flash`, `moe`,
+  `attention`), with no spaces before the colon.
 
 **The title is at most 12 words, not counting the leading `[...]` tags.** Count
 whitespace-separated tokens, so `GLM-5.3-Flash:` is one word. Keep the component and the
 change; drop articles, file and kernel names, and anything the body already says.
 
-| Too long | Within 12 words |
+| Too long or failing the check | Passes, within 12 words |
 | --- | --- |
-| `[AMD][gfx95] MXFP4 MoE decode: fold routing and the FP4 quant into the small sort, small-M kernel for GLM-5.3-Flash` (19) | `[AMD][gfx95] GLM-5.3-Flash MXFP4 MoE decode: fold routing and FP4 quant into sort` (11) |
+| `[AMD][gfx95] MXFP4 MoE decode: fold routing and the FP4 quant into the small sort, small-M kernel for GLM-5.3-Flash` (19, no type, two tags) | `[Perf] [AMD] GLM-5.3-Flash: Fold MXFP4 MoE routing and FP4 quant into sort` (11) |
 
 Open as **draft** until CI is green. A maintainer adds the `amd` and `run-ci` labels; CI does
 not run on the AMD boxes without them.
