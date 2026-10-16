@@ -71,6 +71,19 @@ neighbours, so this never licenses a private style.
 When you take the trade deliberately, say so in Scope in one clause, or it reads as an oversight:
 "routed through `X` rather than adding a backend class, to keep the change in one file."
 
+## No new env flag per optimization
+
+A measured win replaces the old path; it does not sit beside it behind a switch. Do not add a new variable to `python/sglang/srt/environ.py` for an optimization. One flag per change turns the server launch into a long list of env vars, and an off switch for the faster, verified path only keeps slower code reachable.
+
+| Case | Do |
+| --- | --- |
+| The new path covers a shape or config | Take it unconditionally there; no flag |
+| The new path does not cover a shape or config (larger M, EP, other models, a build failure) | Keep the old code as the fallback, chosen by the shape or config check itself |
+| An upstream flag already gates this family of kernels | Reuse it; say so in Scope |
+| The user asks for a flag | Add it |
+
+Scope then names the conditions that pick the new path, not an env var that restores the old one.
+
 ## The 100-word rule
 
 Each section's **prose** is capped at 100 words. Tables and code blocks do not count.
