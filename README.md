@@ -23,4 +23,5 @@ This creates symlinks from `~/.cursor/skills/<skill-name>` to the corresponding 
 | `PR/sglang-pr` | Write an sgl-project/sglang PR body: Summary / Scope / Test plan, 100 words per section, detail in tables |
 | `PR/sglang-pr-review` | Review an SGLang PR for OOP, engineering, and repo conventions (AMD gates, kernel tests). Draft locally; do not post until approved |
 | `PR/aiter-pr` | Write a ROCm/aiter PR body: Motivation / Test Plan / Test Result, 100 words per section, detail in tables |
+| `PR/sgl-amd-mono-pr` | Write and open an sgl-project/sgl-amd-mono PR: the repo template (Motivation / Modifications / Accuracy Tests / Speed Tests and Profiling / Checklist), 100 words per section, title check, fork + lint workflow |
 | `standup-meeting` | Write daily standup notes (Last day / Today, grouped by ticket ID) |
