@@ -24,4 +24,5 @@ This creates symlinks from `~/.cursor/skills/<skill-name>` to the corresponding 
 | `PR/sglang-pr-review` | Review an SGLang PR for OOP, engineering, and repo conventions (AMD gates, kernel tests). Draft locally; do not post until approved |
 | `PR/aiter-pr` | Write a ROCm/aiter PR body: Motivation / Test Plan / Test Result, 100 words per section, detail in tables |
 | `PR/sgl-amd-mono-pr` | Write and open an sgl-project/sgl-amd-mono PR: the repo template (Motivation / Modifications / Accuracy Tests / Speed Tests and Profiling / Checklist), 100 words per section, title check, fork + lint workflow |
+| `monokernel-dev` | Build or extend an sgl-amd-mono monokernel: scoping, precedents, the verification gate ladder (layer correctness, long context, microbench, GSM8K, AgentX), profiling, pitfalls; plus a GLM-5.3-Flash MTP case study and a guide for directing the agent. Tested only with Claude Opus 5.5 (High) |
 | `standup-meeting` | Write daily standup notes (Last day / Today, grouped by ticket ID) |
