@@ -10,6 +10,7 @@ A monokernel is a persistent kernel that runs most of a decoder layer (attention
 
 Worked example: [case-study-glm53-flash-mtp.md](case-study-glm53-flash-mtp.md).
 Detailed failure cases: [pitfalls.md](pitfalls.md).
+New model: [new-model.md](new-model.md).
 
 Tested with: **Claude Opus 5.5 at High effort** in Cursor agent mode. 
 
@@ -19,7 +20,7 @@ Classify the job; say which it is in your first reply:
 
 - **Add a step type** to an existing kernel. A step type is a kind of forward step SGLang runs: decode (1 token a request), MTP / EAGLE target verify (steps + 1 tokens a request, 4 for MTP3), draft extend, prefill. Most kernels start with decode only; e.g. add MTP verify.
 - **Raise the row limit** (check the LDS budget first: `WORK_WORDS <= 32768` per CTA, and each row's activations live in LDS).
-- **New model** (start from the closest package; far larger).
+- **New model** (far larger). Follow [new-model.md](new-model.md) first: an architecture reference from SGLang, the choice of base package, a design document and the bring-up order, each reviewed by the user.
 
 Collect these before writing code. Ask for any that are missing and have no default:
 
