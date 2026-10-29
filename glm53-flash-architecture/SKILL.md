@@ -1,5 +1,5 @@
 ---
-name: GLM5.3-Flash
+name: glm53-flash-architecture
 description: >-
   GLM-5.3-Flash (zai-org/GLM-5.3-Flash, SGLang `Glm5NextForConditionalGeneration`)
   的 model 架構參考：hybrid attention（KDA linear attention + MLA/DSA k-pool sparse

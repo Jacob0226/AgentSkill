@@ -14,7 +14,7 @@ add what went wrong to pitfalls.md.
 A monokernel reimplements SGLang's forward for one model. Every detail it gets wrong
 (a quantization format, a routing tie-break, a missing RoPE, an extra residual
 stream) becomes a numerics bug that is found late. So first write the model's
-architecture reference, as a skill folder like `AgentSkill/GLM5.3-Flash/` (its
+architecture reference, as a skill folder like `AgentSkill/glm53-flash-architecture/` (its
 `SKILL.md` and `layer-structure.md` are the template). Cite SGLang functions and
 classes, not line numbers.
 
