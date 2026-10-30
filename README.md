@@ -26,3 +26,4 @@ This creates symlinks from `~/.cursor/skills/<skill-name>` to the corresponding 
 | `PR/sgl-amd-mono-pr` | Write and open an sgl-project/sgl-amd-mono PR: the repo template (Motivation / Modifications / Accuracy Tests / Speed Tests and Profiling / Checklist), 100 words per section, title check, fork + lint workflow |
 | `monokernel-dev` | Build or extend an sgl-amd-mono monokernel: scoping, precedents, the verification gate ladder (layer correctness, long context, microbench, GSM8K, AgentX), profiling, pitfalls; plus a GLM-5.3-Flash MTP case study and a guide for directing the agent. Tested only with Claude Opus 5.5 (High) |
 | `standup-meeting` | Write daily standup notes (Last day / Today, grouped by ticket ID) |
+| `reserve-crusoe` | Reserve 3 exclusive 8-GPU nodes on Crusoe amd-spur, Mon–Fri 04:00–00:00 Asia/Taipei (20h) |
