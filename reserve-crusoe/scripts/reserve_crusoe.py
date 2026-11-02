@@ -24,9 +24,9 @@ from datetime import datetime, timedelta, timezone
 TPE = timezone(timedelta(hours=8))
 
 NAME_BASE = "Jacob_GLM_hold"
-ACCOUNT = "amd-aifw-di"
-QOS = "amd-aifw-di-qos"
-PARTITION = "amd-spur"
+ACCOUNT = "amd-aifw-sglang"
+QOS = "amd-aifw-sglang-qos"
+PARTITION = "amd-aifw-sglang"
 GPUS = "8"
 NODES = 3
 START_HOUR = 4
@@ -34,11 +34,6 @@ WALL = timedelta(hours=20)
 MIN_WALL = timedelta(minutes=30)
 
 LOG = os.path.expanduser("~/hold-chain.log")
-HOLD_BODY = (
-    'echo "JobId: $SLURM_JOB_ID Node: $SLURM_NODELIST Started: $(date -Is)"; '
-    'echo "Attach: srun --jobid=$SLURM_JOB_ID --pty bash"; '
-    "sleep infinity"
-)
 NAME_RE = re.compile(
     rf"^{re.escape(NAME_BASE)}_(\d{{8}})(?:_([a-z])|([a-z]))?$"
 )
@@ -182,7 +177,25 @@ def job_window_end(job):
     return (start + WALL).astimezone(timezone.utc)
 
 
-def submit(walltime, name, begin=None):
+def hold_body(end):
+    """Sleep until the window end, not for the whole Slurm time limit.
+
+    TimeLimit starts when the job actually runs. A 20h limit that starts at
+    11:00 would still be allocated at 07:00 the next day. Exiting at 00:00
+    Taipei releases the node before the next day's 04:00 jobs are eligible.
+    """
+    end_epoch = int(end.astimezone(timezone.utc).timestamp())
+    return (
+        'echo "JobId: $SLURM_JOB_ID Node: $SLURM_NODELIST Started: $(date -Is)"; '
+        'echo "Attach: srun --jobid=$SLURM_JOB_ID --pty bash"; '
+        f"end={end_epoch}; "
+        'left=$((end - $(date +%s))); '
+        'if [ "$left" -le 0 ]; then echo "window ended"; exit 0; fi; '
+        'sleep "$left"'
+    )
+
+
+def submit(walltime, name, end, begin=None):
     cmd = [
         "sbatch",
         "--parsable",
@@ -195,7 +208,7 @@ def submit(walltime, name, begin=None):
         "--exclusive",
         f"--output={os.path.expanduser('~')}/hold-alloc-%j.out",
         f"--error={os.path.expanduser('~')}/hold-alloc-%j.err",
-        f"--wrap={HOLD_BODY}",
+        f"--wrap={hold_body(end)}",
     ]
     if begin is not None:
         cmd.insert(2, f"--begin={utc_stamp(begin)}")
@@ -306,7 +319,7 @@ def ensure_future(jobs, start):
         if name is None:
             log(f"no free job name for {day}")
             return
-        if submit(WALL, name, begin=start) is None:
+        if submit(WALL, name, end, begin=start) is None:
             return
 
 
@@ -363,7 +376,7 @@ def ensure_current(jobs, start, end, now):
             if name is None:
                 log(f"no free job name for {day}")
                 return
-            if submit(wall, name, begin=begin) is None:
+            if submit(wall, name, end, begin=begin) is None:
                 return
             spans.append((moment, end_utc))
         return
