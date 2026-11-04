@@ -14,6 +14,15 @@ The repo ships a template (`.github/pull_request_template.md`). Use its sections
 
 Drop the template's HTML comments and its **Review and Merge Process** section; merged PRs keep neither. A short **Not covered** section before Checklist is allowed when the limits do not fit in Modifications (#56 does this).
 
+The comments are still the requirements; reviewers quote them ("as the template asks"):
+
+| Section | The template's comment |
+| --- | --- |
+| Accuracy Tests | "If this pull request changes kernel or forward code, give accuracy results with the monokernels on and off, on the same server." |
+| Speed Tests and Profiling | "If this pull request affects speed, give per-user decode results with the monokernels on and off, including past the largest width." |
+
+"Past the largest width" means a control point: a load where every step is wider than the monokernel runs, so both sides run SGLang's path and must match. It bounds the run-to-run noise of the other points (#95's "off (control)" rows, #71's c16 MTP3).
+
 ## Write for a reviewer who has not read the code
 
 This rule outranks the rest. The code owners (`.github/CODEOWNERS`) review every model's PRs, and they did not write your stage. Every symbol they must look up is a reason to put the tab aside.
@@ -77,6 +86,10 @@ The template asks for results **with the monokernels on and off, on the same ser
 
 State a small accuracy move instead of hiding it: "0.912 on vs 0.907 off, one scoring pass each".
 
+An accuracy run or e2e test counts only for the steps that reach the kernel. Rows a step = requests × draft tokens (MTP3: 4, MTP5: 6), so with a largest width of 8, MTP3 runs 2 requests at a time and MTP5 runs 1. At 12 requests, #71's `TestMonokernelMtp` put about 14% of the verify work on the kernel, and its accept-length bound could not fail (the code owner's request 2). Say what share of the steps ran the kernel, and make each bound one that fails when the kernel path breaks.
+
+Accept length is evidence only with real acceptance. AgentX's golden accept length (`SGLANG_SIMULATE_ACC_LEN`, `SGLANG_SIMULATE_ACC_METHOD=match-expected`) fixes it regardless of the verify, so it says nothing about correctness.
+
 ### Speed Tests and Profiling
 
 The template asks for **per-user decode, on and off, including past the largest width** (where both sides run SGLang's path and must match). Name the setup (image, SGLang commit, flags, workload, rounds), then tables:
@@ -87,6 +100,22 @@ The template asks for **per-user decode, on and off, including past the largest 
 | Kernel only | `test/kernels/<model>/time_layers.py --kind <kind> --rows ...`, µs a launch, `main` → this PR |
 
 Say the run-to-run spread when it is comparable to the gain ("c1 screens at 900 s move by several percent between identical runs", #56).
+
+**AgentX.** The code owner (`@jhinpan`) reruns AgentX tables and asks for everything below when it is missing (#71, both reviews):
+
+| Item | Say |
+| --- | --- |
+| Same-configuration A/B | Off and on on one node at the same time (GPUs 0–3 and 4–7; a second round swaps the sets), same image, flags and MTP depth. Never off at MTP5 against on at MTP3, or off from another node or day. |
+| Window | 3,600 s, as InferenceX runs it. Name it: 900-s windows move by as much as the gain. |
+| Columns | P90 interactivity (1 / ITL p90), P90 E2E-normalized interactivity, P90 TTFT, total tok/s/GPU, and requests completed by each side (a side that finishes more turns in the window shifts the P90s) |
+| Control point | One concurrency past the largest width (see the template's comment above) |
+| Server command | In a `bash` block: the full `launch_server` line and every exported env var, `SGLANG_SIMULATE_ACC_*` included. Say that off drops `--monokernel-backend amd`. |
+| Client | aiperf version and source commits (InferenceX and its `utils/aiperf` submodule), and the full `aiperf profile` line in a `bash` block |
+| Aggregate JSONs | The aggregate JSON of each point (`*_local-mi355x.json`), in a gist linked from the body |
+
+When the points differ only in a few values (concurrency, MTP depth, golden accept length), give one point's commands and a table of the differences.
+
+When the code owner's rerun disagrees because it used shorter windows, keep the 3,600-s target rather than rerunning at their window. Give the commands so the two runs can be compared.
 
 ### Checklist
 
@@ -110,6 +139,10 @@ Copy the template's five items. Tick what holds; for an unticked item say why in
 - **Name the thing:** the stage, the `SGLANG_READS` key, the env var. A reviewer greps for it.
 - **Arrows read old → new** (`main` → this PR, off → on), as every merged PR here does.
 - **No new env flag per optimization.** A verified faster path replaces the old one; the shape or config check picks the fallback.
+- **One change per PR.** A fix that does not need the feature (#71's decode fault past 262,144 tokens) goes in its own `[Fix]` PR, merged first (#97).
+- **Test on upstream SGLang.** Name the commit, and each open SGLang PR the change needs; a stack of unrelated AMD PRs is not a setup the code owner can rerun.
+- **Refuse at startup.** A server setting the monokernel cannot run is a config disable reason (glm53_flash: `_config_disable_reasons` in `spec.py`), with a unit test, not an error at the first step.
+- **Read declared SGLang attributes directly.** When SGLang declares one with a default, `getattr(x, "name", None)` hides a rename that `SGLANG_READS` would catch.
 - **Code comments say what the code cannot show** (#43–#46 trimmed the rest). Never where a change came from or why the diff is right.
 
 ## Title
