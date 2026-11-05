@@ -90,6 +90,8 @@ An accuracy run or e2e test counts only for the steps that reach the kernel. Row
 
 Accept length is evidence only with real acceptance. AgentX's golden accept length (`SGLANG_SIMULATE_ACC_LEN`, `SGLANG_SIMULATE_ACC_METHOD=match-expected`) fixes it regardless of the verify, so it says nothing about correctness.
 
+For DSA models, GSM8K prompts are shorter than the index top-k, so every key is selected and the sparse selection is not tested. A change to DSA, or a new width whose launch is close to but not bitwise equal to its reference, also needs a long-context check with real acceptance at the new widths, e.g. RULER NIAH at 300K and 640K (#98).
+
 ### Speed Tests and Profiling
 
 The template asks for **per-user decode, on and off, including past the largest width** (where both sides run SGLang's path and must match). Name the setup (image, SGLang commit, flags, workload, rounds), then tables:
@@ -105,7 +107,7 @@ Say the run-to-run spread when it is comparable to the gain ("c1 screens at 900 
 
 | Item | Say |
 | --- | --- |
-| Same-configuration A/B | Off and on on one node at the same time (GPUs 0–3 and 4–7; a second round swaps the sets), same image, flags and MTP depth. Never off at MTP5 against on at MTP3, or off from another node or day. |
+| Same-configuration A/B | Same image, flags and MTP depth. Run off and on one at a time, or at the same time on GPUs 0–3 and 4–7 with a second round that swaps the sets; one round on one node shares HBM, fabric and power. Never off from another node or day. A best-against-best row (off at MTP5, on at MTP3) may be added as a separate row, never in place of the same-MTP pair (#98). |
 | Window | 3,600 s, as InferenceX runs it. Name it: 900-s windows move by as much as the gain. |
 | Columns | P90 interactivity (1 / ITL p90), P90 E2E-normalized interactivity, P90 TTFT, total tok/s/GPU, and requests completed by each side (a side that finishes more turns in the window shifts the P90s) |
 | Control point | One concurrency past the largest width (see the template's comment above) |
@@ -116,6 +118,8 @@ Say the run-to-run spread when it is comparable to the gain ("c1 screens at 900 
 When the points differ only in a few values (concurrency, MTP depth, golden accept length), give one point's commands and a table of the differences.
 
 When the code owner's rerun disagrees because it used shorter windows, keep the 3,600-s target rather than rerunning at their window. Give the commands so the two runs can be compared.
+
+A metric the change should not move (TTFT for a change to verify launches only) that moves shows the noise of the setup; give a replicate pair so that its size is known (#100).
 
 ### Checklist
 
@@ -133,6 +137,8 @@ Copy the template's five items. Tick what holds; for an unticked item say why in
 
 - **Never hard-wrap the body.** One line per paragraph. GitHub soft-wraps; the commit message still wraps at 72.
 - **Measured numbers, never adjectives.** "2.534 → 2.433 ms (−4.0%)", not "faster".
+- **Every number in the prose is in a table,** with the command that measured it. #98's Motivation gave 183 µs for the per-row MoE at 16 rows, and no table showed it.
+- **State a slower cell,** with its size and whether a threshold would avoid it (#100: 4 rows at pos 8191, +2.4%).
 - **One variable.** On and off share an image, SGLang commit, checkpoint, TP and flags except `--monokernel-backend amd`; say so.
 - **Never write "arm".** Say "off" / "on", or "`main`" / "this PR".
 - **Name the statistic** in every header: median TPOT, P90 interactivity, mean TTFT.
@@ -143,6 +149,8 @@ Copy the template's five items. Tick what holds; for an unticked item say why in
 - **Test on upstream SGLang.** Name the commit, and each open SGLang PR the change needs; a stack of unrelated AMD PRs is not a setup the code owner can rerun.
 - **Refuse at startup.** A server setting the monokernel cannot run is a config disable reason (glm53_flash: `_config_disable_reasons` in `spec.py`), with a unit test, not an error at the first step.
 - **Read declared SGLang attributes directly.** When SGLang declares one with a default, `getattr(x, "name", None)` hides a rename that `SGLANG_READS` would catch.
+- **Check what the change relies on in SGLang.** If the kernel depends on an SGLang behaviour (#100: a verify request's page-table row repeated for each of its rows), add a check that fails when SGLang stops doing it.
+- **Tests import the server's constants** (`GROUPED_FROM`), never restate them (`rows > 8`), so that the tests build what the server builds (#98).
 - **Code comments say what the code cannot show** (#43–#46 trimmed the rest). Never where a change came from or why the diff is right.
 
 ## Title
