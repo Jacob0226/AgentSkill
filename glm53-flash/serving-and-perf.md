@@ -108,38 +108,9 @@ decode batch 的數量沒有對應關係。
 只有 19.17（`=1` 的 prstack-fix 是 22.92），所以 recipe 維持 image 預設的 `=1`，
 conc 64 crash 時就重跑。crash 前剩餘 HBM 只有 0.28–1.5 GB（HSA 錯誤訊息裡的 Available Free mem）。
 
-## 1012 image 與 PR stack
+## PR stack
 
-Image `rocm/sgl-dev:v0.5.21-rocm10-mi35x-20261012` 內建 sglang `d1357bf87b`、aiter
-`e7d2453f2`（在 container 裡用 `git log -1` 確認過）。目前的 GLM-5.3 PR 狀態：
-
-| PR | 內容 | 狀態 | 1012 image 裡？ |
-|---|---|---|---|
-| sglang #41161 | shared expert 併進 AITER MoE（FP8） | merged | **有** |
-| sglang #41870 | Quark MXFP4 的 shared expert fusion + KDA projection fusion | merged | **有** |
-| sglang #41615 | GLM-5.3 改用 Triton sparse MLA，新增 `aiter_sparse_mla` | open | 沒有，PR stack 疊 |
-| sglang #41871 | MXFP4 small-M MoE kernel 支援 GLM-5.3 TP4 shape（intermediate 512、8/9 slots、≤16 token、`swiglu_limit`）+ small sort 融合 MXFP4 quant | open | 沒有，PR stack 疊（image 只有 Qwen3.5 的 10/11 slots，所以 GLM-5.3 走不到 small-M） |
-| sglang #42020 | FFN all-reduce + `hc_post` 融合（`SGLANG_ROCM_FUSED_AR_MHC_POST`） | open | 沒有，PR stack 疊 |
-| sglang #38764 | KDA projection opt-in PTPC FP8（`SGLANG_OPT_GLM53_KDA_PTPC_MODULES`） | open | 沒有，PR stack 疊 |
-| sglang #39121 | KDA prefill kernel tuning | **closed，沒 merge** | 沒有，PR stack 也沒有 |
-| aiter #5933 | `gemm_a16w16` N=288 K=4096 config（router GEMM） | merged | 沒有，手動複製 JSON |
-| aiter #5982 | GLM-5.3 TP4 fused KDA in-proj BF16 GEMM tuning | merged | 沒有，手動複製 CSV |
-| aiter #6276 | gfx950 `sparse_mla` bf16 KV-tile store 去 bank conflict | merged | 沒有，也沒補；只影響 `aiter_sparse_mla` |
-
-PR stack 在 `~/PR/wt-glm53-1012-prstack`（branch `glm53-1012-prstack`，依序疊 #41615、#41871、
-#42020、#38764）。啟動方式見 `~/SGLang-benchmarks/tmp/agentic_1014/run_triton.sh`：
-
-- 把 `$TREE/python` 複製到 container 的 `/root/ab_trees/prstack`，用 `PYTHONPATH` 蓋過 image 的 sglang。
-- 把 aiter#5933 的 `GEMM-A16W16-N=288-K=4096.json` 與 aiter#5982 的 `glm53_flash_bf16_{tuned,untuned}_gemm.csv`
-  複製進 image 的 aiter。
-- 環境變數：`SGLANG_ROCM_FUSED_AR_MHC_POST=1`、
-  `SGLANG_OPT_GLM53_KDA_PTPC_MODULES=qkv_proj,f_a_proj,g_a_proj,o_proj`。
-- DSA backend：`--dsa-prefill-backend triton --dsa-decode-backend triton`（Agentic 腳本是 `--dsa-backend triton`）。
-
-在 1012 image 的 container 裡可以這樣確認哪些 PR 生效：server log 有
-`Shared experts fusion optimization enabled.` 與 `E=289, topk=9`；decode trace 有
-`smallm_p2_i512_s9`（#41871）、`allreduce_mhc_post_large_m_kernel`（#42020）、
-`_sparse_mla_decode_split_kernel`（Triton DSA）。
+目前的 image、自己疊的 PR、aiter patch 與手動步驟都在 `pr-stack.md`（1012 image 那份移到它的歷史紀錄）。重跑 benchmark 前先讀它。
 
 ## MI355X TP4 agentic 設定與實測（0928 image recipe）
 

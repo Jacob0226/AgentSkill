@@ -1,5 +1,5 @@
 ---
-name: glm53-flash-architecture
+name: glm53-flash
 description: >-
   GLM-5.3-Flash (zai-org/GLM-5.3-Flash, SGLang `Glm5NextForConditionalGeneration`)
   的 model 架構參考：hybrid attention（KDA linear attention + MLA/DSA k-pool sparse
@@ -7,7 +7,9 @@ description: >-
   encoder、MTP draft layer。Use when analysing, profiling, debugging, or tuning
   GLM-5.3-Flash in SGLang — 例如判斷某個 kernel 屬於哪一種 layer、估算 KV cache /
   state cache 大小、解讀 trace 裡的 layer breakdown，或比較它與 GLM-5.2 / DeepSeek-V3.2
-  的差異。
+  的差異。也記錄 MI355X 目前的 image、自己疊的 sglang / aiter PR stack 與手動步驟；
+  Use before rerunning or reproducing any GLM-5.3-Flash benchmark (Agentic, GSM8K,
+  fixed-length) so no PR, patch or env is missed.
 ---
 
 # GLM-5.3-Flash 架構總覽
@@ -42,9 +44,12 @@ AMD 的 `amd/GLM-5.3-Flash-Quark-MXFP4` **不是全部 MXFP4**，是三種精度
 
 各文件引用程式碼時以 **函式 / class 名稱** 為準，行號會隨 rebase 漂移，所以不寫行號。
 
-**驗證基準**：image `rocm/sgl-dev:v0.5.21-rocm10-mi35x-20261012`（sglang `d1357bf87b`、
-aiter `e7d2453f2`），加上 `~/PR/wt-glm53-1012-prstack` 的 PR stack。哪些 PR 已在 image、
-哪些要自己疊，見 `serving-and-perf.md` 的「1012 image 與 PR stack」。
+**驗證基準**：架構內容是在 image `rocm/sgl-dev:v0.5.21-rocm10-mi35x-20261012`（sglang
+`d1357bf87b`、aiter `e7d2453f2`）加上當時的 PR stack 上驗證的。
+
+**重跑 benchmark 前先讀 `pr-stack.md`。** 它列出目前的 image、要自己疊的 sglang PR（含
+stack 用的 head 和生效訊號）、image 裡沒有的 aiter PR，以及 recipe 沒做的手動步驟
+（MoE tuned CSV、env）。漏掉任何一項，數字就跟之前的報告對不上。
 
 ## 一句話描述
 
@@ -115,6 +120,7 @@ MTP layer 不在 `kda_layers` 清單裡，所以它是 **MLA/DSA + MoE**。但�
 | `kda-linear-attention.md` | KDA 的 projection 清單、gated delta rule recurrence、state cache 大小、prefill/decode kernel |
 | `dsa-kpool-indexer.md` | k-pool indexer 的 pooling、tail 選取、top-k 展開、kernel 清單、和 GLM-5.2 indexer 對照 |
 | `serving-and-perf.md` | 啟動 flag、兩個 memory pool 的調參、MI355X TP4 實測數字、已知踩雷 |
+| `pr-stack.md` | MI355X 目前的 image、自己疊的 PR stack、aiter patch、手動步驟、重跑前檢查清單；舊 image 的 stack 留作歷史 |
 
 ## 常見誤判（讀 trace / debug 前先確認）
 
