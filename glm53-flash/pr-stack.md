@@ -1,58 +1,131 @@
 # PR stack（MI355X 重跑 benchmark 前必讀）
 
-最後更新：2026-11-07（台灣時間）。「狀態」欄是當天用 `gh pr view` 查的，重跑前先照最後一節「重跑前檢查」更新一次。
+最後更新：2026-11-07（台灣時間）。「狀態」與「能不能套」是當天查的，重跑前先照最後的「重跑前檢查」更新一次。
 
-MI355X 的數字一律來自「image + 自己疊的 PR stack + 手動步驟」三層；漏掉任何一層，結果就跟之前的報告對不上。B200 用 stock image，沒有 PR stack（見「B200 對照」）。
+MI355X 的數字來自四層：**image、自己疊的 sglang PR stack、monokernel（sgl-amd-mono）版本、手動步驟（env、CSV、server flag）**。漏掉任何一層，結果就跟之前的報告對不上。**把 PR 套進 tree 不等於它會生效**：很多 PR 要 env、server flag 或特定條件才會跑到，見「每個 PR 怎麼啟用」。B200 用 stock image，沒有 PR stack。
 
-## 目前基準（1026 image，11/06 Agentic 數字用的這套）
+## 目前基準：1106 image
 
 | 項目 | 值 |
 |---|---|
-| Image | `rocm/sgl-dev:v0.5.22-rocm10-mi35x-20261026`，image 內 sglang `5ef99013ac`、aiter `285579b62` |
-| sglang tree | `/shared_nfs/jacchang/exp/sglang-fp8kv-1103`，branch `glm53-1105-bcg-hybrid-dsa`，HEAD `b1c1c92cdc`。底是 image 的 `5ef99013ac`，上面 14 個 commit；用 `PYTHONPATH=$SGL/python` 蓋過 image 的 sglang |
-| mono tree | `/shared_nfs/jacchang/exp/sgl-amd-mono-iscore`（branch `glm53-flash-dsa-iscore-req`）也放在 `PYTHONPATH` 最前面；Agentic recipe 沒開 monokernel |
-| 啟動鏈 | `/shared_nfs/jacchang/agentic_1106/lane_env_dur.sh`（`DUR` 秒數，預設 1800）→ `~/SGLang-benchmarks/Agentic/ix_agentx_glm53flash.sh --platform mi355x` → `recipe_glm53flash_fp4_mi355x_sglang_mtp.sh` |
+| Image | `rocm/sgl-dev:v0.5.23-rocm10-mi35x-20261106`（digest `sha256:35750c54…`，11/07 在 node 150 pull） |
+| image 內 sglang | `c06e39c6ca`（11/06 的 upstream main） |
+| image 內 aiter | `285579b62`，**跟 1026 image 一樣，沒有更新** |
+| image 內 sgl-amd-mono | `/sgl-workspace/sgl-amd-mono`，editable install，`e52803f`（11/04） |
+| 其他 | FlyDSL 0.4.0、torch 2.11.0+rocm10.0.0、triton 3.8.0；image 預設 `HSA_NO_SCRATCH_RECLAIM=1`、`SGLANG_USE_AITER=1` |
+| sglang stack | `~/PR/wt-glm53-1106-prstack`，branch `glm53-prstack-c06e39c6ca`，HEAD `94f7a7ece1`：`c06e39c6ca` 上 9 個 commit（一個 PR 一個），見「1106 stack 的解衝突紀錄」 |
+| mono | `/shared_nfs/jacchang/exp/sgl-amd-mono-main1107`（upstream main `25723f1`），見「Monokernel」 |
+| 驗證 | `/shared_nfs/jacchang/prstack_1107/`（node 150）：BF16 KV、Triton DSA、BCG、MoE CSV、兩個 env、MTP5。GPU 0–3 用 `run_gsm.sh`（HiCache 216 GB，不開 monokernel）；GPU 4–7 用 `run_gsm_mono.sh`（不開 HiCache，開 monokernel） |
 
-## sglang：自己疊的 PR（依疊的順序）
+11/07 驗證結果（sgl-eval GSM8K，1319 threads、thinking、temperature 1.0、top-p 0.95；1026 stack 是 96.44%）：
 
-stack 裡的 commit 是當時的 PR head 套在 `2815eed49c` 上再搬到 `5ef99013ac`；「stack head → 目前 head」不同時，代表 PR 之後有更新，stack 還是舊版。
+| lane | GSM8K | stop rate | 99,840 prefix + 16 / 512 / 4096 new tokens 的 prefill |
+|---|---|---|---|
+| stack（HiCache） | 96.66% | 99.55% | 38.8 / 52.9 / 137.4 ms |
+| stack + monokernel（無 HiCache） | 97.19% | 99.85% | 37.4 / 51.9 / 135.2 ms |
 
-| # | PR | 內容 | 狀態（11/07） | stack head → 目前 head | 生效怎麼看 |
-|---|---|---|---|---|---|
-| 1 | sglang #41615 | GLM-5.3 改用 Triton sparse MLA（gfx950） | open | `acca6a72db`（相同） | decode trace 有 `_sparse_mla_decode_split_kernel` |
-| 2 | sglang #41871 | small-M MoE kernel + sort 融合 MXFP4 quant | open | `ac5057efad` → `2f3232f34d` | decode trace 有 `smallm_p2_i512_s9` |
-| 3 | sglang #42020 | FFN all-reduce + `hc_post` 融合，env `SGLANG_ROCM_FUSED_AR_MHC_POST=1` | **closed，沒 merge**（draft 23 天沒更新，stale bot 10/25 自動關） | `bd5ddf3358`，改接 `ExitDecision(sum_in_reduce_scatter)` API | decode trace 有 `allreduce_mhc_post_large_m_kernel` |
-| 4 | sglang #38764 | KDA projection opt-in PTPC FP8，env `SGLANG_OPT_GLM53_KDA_PTPC_MODULES=qkv_proj,f_a_proj,g_a_proj,o_proj` | open | `1d33eed202` → `c8c963cf0f` | KDA projection 在 trace 裡是 FP8 GEMM，不是 BF16 |
-| 5 | sglang #44415 | MoE correction bias 保持 fp32（bug fix，沒有效能影響） | open | `4272d975f1` → `2e8c7f9b39` | — |
-| 6 | sglang #44416 | MTP verify：one-launch MoE router + 較窄的 KDA V tile（疊在 #44415 上） | open | `9b1d711bba` → `3d692f0a25` | — |
-| 7 | sglang #44417 | MTP verify：減少 DSA k-pool indexer launch | open | `60336705fe` → `8499d23086` | — |
-| 8 | sglang #46036 | mono-kernels 依 model type 註冊 spec | **merged**（在 image 之後） | `f73a82b40e` | 換到含它的 image 後可從 stack 拿掉 |
-| 9 | sglang #46808 | HIP verify 的 sort-free top-p + 多 row softmax（stack 裡是 3 個 commit：`2514ded128`、`d41967ade8`、`42665af0e0`） | open | 內容同 PR 的 3 個 commit，PR 另有 merge main | — |
-| 10 | 沒有 PR | `f0a7a579d5` GLM-5.3-Flash 在 gfx950 Triton sparse-MLA 允許 FP8 e4m3 KV（依賴 #41615） | 只在內部 tree | — | `--kv-cache-dtype fp8_e4m3` 能啟動且走 Triton DSA |
-| 11 | sglang #48875 | BCG：hybrid KDA 包住的 DSA 也能 replay breakable prefill graph，graph 裡的 KDA extend 走 HIP | draft，open | stack `e4cd94409d`、`b1c1c92cdc`；PR 是 `3121fec7f8`、`c9670de08c`（同內容 rebase 到 main） | 99,840 prefix + 16 new tokens 的 prefill 約 37 ms（沒 replay 時約 99 ms） |
+1319 threads 下 decode batch 大多超過 2 個 request，monokernel 只在尾段接手，所以這個 GSM8K 主要驗證的是開 monokernel 時 stack 沒壞。
 
-### 已在 1026 image 裡，不用疊
+查法：`docker run --rm --entrypoint bash <image> -c 'pip list | grep -iE "sglang|aiter|amd-mono|flydsl"; git -C /sgl-workspace/sgl-amd-mono log -1'`（sglang 和 aiter 的 commit 在 pip 版本字串的 `+g<commit>` 裡）。判斷某個 merged PR 在不在 image：在本地 repo 跑 `git merge-base --is-ancestor <PR merge commit> <image commit>`。
 
-| PR | 內容 |
-|---|---|
-| sglang #41161 / #41870 | shared expert 併進 AITER MoE（log：`Shared experts fusion optimization enabled.`、`E=289, topk=9`）；#41870 另含 KDA projection fusion |
-| sglang #43182 | GLM-5.3-Flash interleave BCG（batched prefill、DFlash2） |
-| sglang #45710 / #45713 | gfx950 HIP KDA chunked-prefill / fused decode kernel（#48875 的 HIP extend 用的就是 #45710） |
+## Merged PR：在 1106 image 裡嗎？
 
-## aiter
+| PR | 內容 | 在 1106 image？ | 要做什麼 |
+|---|---|---|---|
+| sglang #41870 | Quark MXFP4 shared expert fusion + KDA projection fusion（ITL −9.8 ~ −13.6%） | 有 | 不用 |
+| sglang #41161 | shared expert 併進 AITER MoE（gfx950） | 有 | 不用 |
+| sglang #46036 | mono-kernels 依 model type 註冊 spec（monokernel 需要） | 有 | 不用；1026 的 stack 要自己疊，現在不用 |
+| sglang #46980 | recurrent state ownership 重構（mono #71 需要） | 有 | 不用 |
+| aiter #5933 | `gemm_a16w16` N=288 K=4096 config（TPOT −9%） | 有 | 不用 |
+| aiter #5982 | GLM-5.3-Flash TP4 fused KDA in-proj BF16 GEMM tuning（TPOT −1.2%） | 有 | 不用 |
+| aiter #6276 | gfx950 `sparse_mla` bf16 KV-tile store 去 bank conflict | 有 | 不用（只影響 `aiter_sparse_mla`） |
+| aiter #6435 | GLM-5.3-Flash MXFP4 fused-MoE tuned CSV（別人的 PR） | **沒有** | 見「手動步驟」 |
+| sgl-amd-mono #97 | sparse attention 超過 262,144 token 的 fault 修正 | 有 | 不用 |
+| sgl-amd-mono #71 | MTP verify step 跑在 monokernel 上 | **沒有** | 見「Monokernel」 |
+| sgl-amd-mono #98 | verify step 最多 16 rows | **沒有** | 同上 |
+| sgl-amd-mono #100 | verify request 的 index tile 只算一次 | **沒有** | 同上 |
 
-| PR | 內容 | 狀態 | 在 1026 image（aiter `285579b62`）？ | 要做什麼 |
-|---|---|---|---|---|
-| aiter #5933 | `gemm_a16w16` N=288 K=4096 config（router GEMM） | merged 10/02 | 有 | 不用 |
-| aiter #5982 | GLM-5.3-Flash TP4 fused KDA in-proj BF16 GEMM tuning | merged 10/12 | 有 | 不用 |
-| aiter #6276 | gfx950 `sparse_mla` bf16 KV-tile store 去 bank conflict | merged 10/13 | 有 | 不用（只影響 `aiter_sparse_mla`） |
-| aiter #6435 | GLM-5.3-Flash MXFP4 fused-MoE tuned CSV（TP4） | merged 10/26 | **沒有** | 要改 code 並 rebuild `module_moe_mxfp4_aux`，見下一節 |
+## Open PR：每個 PR 怎麼啟用
 
-「在 image 裡？」是用 `git merge-base --is-ancestor <merge commit> 285579b62` 確認的。
+「怎麼啟用」是讀 PR diff 得出的：env 的預設值在 `environ.py`，flag 在 server args，其他是程式裡的條件。效果數字是各 PR 自己報的。
+
+| PR | 內容（效果） | 怎麼啟用 | 生效怎麼看 |
+|---|---|---|---|
+| sglang #41615 | Triton sparse MLA（TTFT −10%） | **server flag**：`--dsa-prefill-backend triton --dsa-decode-backend triton`（driver 是 `--dsa-backend triton`；recipe 預設是 `tilelang`）。**只接受 BF16 KV**：配 FP8 KV 時啟動就 `ValueError: Triton with index_kpool > 1 is only validated ... BF16 Q/KV`，見下方「FP8 KV」 | decode trace 有 `_sparse_mla_decode_split_kernel` |
+| sglang #41871 | small-M MoE + sort 融合 MXFP4 quant（conc 4 ITL −4.6%） | 自動：Quark MXFP4、TP4 shape、每步 ≤16 token、`--moe-runner-backend aiter` | decode trace 有 `smallm_p2_i512_s9` |
+| sglang #44415 | MoE correction bias 保持 fp32（bug fix） | 自動：`model_type == glm5_next_text` | — |
+| sglang #44416 | one-launch MoE router + 較窄 KDA V tile（P90 +5.8 ~ 6.5%）；**已包含 #44415 的 commit，疊它就不用再疊 #44415** | 自動：gfx950、每步 ≤16 token、`SGLANG_USE_AITER=1`（image 預設）；`SGLANG_SIMULATE_UNIFORM_EXPERTS` / `ROUND_ROBIN_EXPERTS` 或 expert remapping 開著時退回原路徑 | decode trace 有 smallm router kernel，沒有獨立的 gate GEMM + topk |
+| sglang #44417 | MTP verify 的 k-pool indexer launch 變少（P90 +8%） | 自動：HIP、MTP verify | — |
+| sglang #46808 | sort-free top-p + 多 row softmax（P90 +4%） | 自動：HIP 的 verify sampling；request 要帶 top_p / temperature 才跑到（greedy 不會） | — |
+| sglang #48875 | BCG replay + graph 內 HIP KDA extend（P90 +9%） | **server flag**：`--cuda-graph-backend-prefill breakable`，建議加 `--cuda-graph-max-bs-prefill 2560`（recipe 已設） | 99,840 prefix + 16 new tokens 的 prefill 約 37 ms（沒 replay 約 99 ms） |
+| sglang #38764 | KDA projection PTPC FP8（TTFT −2.2%） | **env**：`SGLANG_OPT_GLM53_KDA_PTPC_MODULES=qkv_proj,f_a_proj,g_a_proj,o_proj`（預設空，沒設等於沒開） | KDA projection 在 trace 裡是 FP8 GEMM |
+| sglang #44659 | row-streaming KDA packed decode（ITL −0.53%） | 自動：gfx950。**只在 `forward_decode`（每個 request 1 token）**；MTP 時 target 走 verify，依程式判斷 MTP benchmark 跑不到它 | 不開 MTP 的 decode trace 有 `kda_packed_decode_rowstream_kernel` |
+| sglang #44661 | KPool Hadamard + FP8 quant 融合（ITL −0.43%） | **env**：`SGLANG_DSA_FUSE_HADAMARD_QUANT=1`（預設 False）；另需 gfx950、indexer head_dim = block_size 且為 2 的次方 | trace 少了獨立的 Hadamard kernel |
+### 從 stack 拿掉的（11/07 使用者決定）
+
+| 項目 | 原本的作用 | 拿掉的影響 |
+|---|---|---|
+| sglang #42020（stale bot 10/25 關閉） | FFN all-reduce + `hc_post` 融合，env `SGLANG_ROCM_FUSED_AR_MHC_POST=1` | 這個 env 在新 stack 沒有作用，不用再設 |
+| `f0a7a579d5`（沒有 PR） | 讓 #41615 的 Triton sparse MLA 接受 FP8 e4m3 KV | 見下方「FP8 KV」 |
+
+**FP8 KV。** 新 stack 裡 `--kv-cache-dtype fp8_e4m3` 和 Triton DSA 不能同時用（啟動就 `ValueError`）。recipe 寫死 `--kv-cache-dtype fp8_e4m3`，driver 又傳 `--dsa-backend triton`，所以照舊的 driver 參數會起不來。二選一：BF16 KV + Triton DSA（從 driver 多傳 `--server-arg --kv-cache-dtype --server-arg bfloat16`，額外參數接在 recipe 後面，後出現的生效），或 FP8 KV + TileLang DSA（driver 改 `--dsa-backend tilelang`）。monokernel 只吃 BF16 KV，所以要開 monokernel 就是前者。
+
+### 1106 stack 的解衝突紀錄
+
+11/07 用 `tools/build_glm53_prstack.sh` 在 image 的 `c06e39c6ca` 上依序疊。#41871、#46808、#44659、#48875 直接套上；其餘的衝突這樣解（重建時照做）：
+
+| PR | 衝突 | 怎麼解 |
+|---|---|---|
+| #41615 | `triton_sparse_mla.py`：upstream #44503 把 KV 載入改成 `_load_kv_group` / `_load_kv_tail`（多了 `KV_SCALED`）；PR 要讓 tail 只在 `D_TAIL > 0` 才載入 | 保留 upstream 的 helper，把 `_load_kv_tail` 包進 `if D_TAIL > 0:`（三個 kernel 各一處） |
+| #41615 | `dsa_backend.py`：upstream #44322 在 `dsa_impl == "triton"` 裡加了 DCP；PR 改成 `in ("triton", "aiter_sparse_mla")` 並先試 aiter | 兩者都留：條件用 PR 的，順序是 DCP → aiter → Triton（prefill 和 decode 各一處）；`_forward_triton_dcp` 和 `_forward_aiter_sparse_mla` 兩個 method 都留 |
+| #38764 | `fused_norm_gate.py` import（upstream #47782 改用 `current_arch`）、`environ.py` 相鄰新增 | import 用 upstream 的再加 PR 的 `fp8_dtype_to_triton`；env 兩個都留 |
+| #44416 | `smallm_router_gfx950/__init__.py`：PR 已 merge 過 #48399（拿掉 `SGLANG_ROCM_SMALLM_ROUTER`、改用 `current_arch`），image 還有這個 env | 用 PR 的版本，補 `from sglang.kernels.arch import current_arch`，`smallm_router_supported` 保留 `envs.SGLANG_ROCM_SMALLM_ROUTER.get()` |
+| #44417 | `dsa_metadata_manager.py`：同樣是 #48399 拿掉 `SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION`，image 還有（預設 True） | `requested and supported and (is_cuda() or _is_hip)`，跟 1026 stack 一樣 |
+| #44661 | `dsa_indexer_kpool.py`：import、新 method 相鄰、`_project_and_scale_head_gates` 被 #44417 改名 | import 用 #44417 後的；兩邊的新 method 都留；呼叫改 `_project_head_gates` |
+| #44661 | **語意衝突，git 不會標**：#44417 把 `n_heads**-0.5` 從 `_project_head_gates` 移到 `_apply_q_scale_and_softmax_scale`，但 #44661 的 `fused_hadamard_act_quant(weights=head_weights, softmax_scale=...)` 假設 `head_weights` 已經乘過 | `_quant_query` 傳 `softmax_scale=self.softmax_scale * self.n_heads**-0.5`；漏了會讓 `SGLANG_DSA_FUSE_HADAMARD_QUANT=1` 時 indexer 分數差一個常數倍 |
+
+拿 11/07 main `b750923a2a` 當 base 時，#44416、#44417 可以直接套，但 #44659 會在 `kda_triton.py` 衝突，其他幾個照樣衝突。
+
+## 建 stack
+
+```bash
+# 預設依序疊：41615 41871 38764 44416 44417 46808 44659 44661 48875
+~/SGLang-benchmarks/tools/build_glm53_prstack.sh <image sglang commit> <worktree> [entry...]
+```
+
+- 每個 PR 用 `gh pr diff`（PR 自己的改動），不會把 PR branch merge 進來的 main commit 帶進來；`c:<commit>` 是只在內部 tree 的 commit。
+- 第一個套不上的 PR 會停下來，衝突留在 worktree 裡。解完 `git add` + commit 後，用剩下的 entry 再跑一次。
+- base 用 image 的 sglang commit，跟 image 的 aiter、sglang-kernel 對得上。用更新的 main 衝突會變少，但要確認 image 的 aiter 撐得住。
+- 解完衝突的 stack 要先過 GSM8K，再跑 benchmark。**1106 image 沒有 `sgl-eval`**，在 container 裡裝到獨立 venv（不要裝進 `/opt/venv`，會改到 openai 等套件）：`python3 -m venv /root/sgl_eval_venv && /root/sgl_eval_venv/bin/pip install "git+https://github.com/sgl-project/sgl-eval.git@a231b7a439b235090ff7baa30778fa2b514309ae"`，再 `cp -r /home/jacchang/.cache/sgl_eval /root/.cache/`，用 `/root/sgl_eval_venv/bin/sgl-eval` 的完整路徑呼叫（不要把 venv 的 `bin` 放進 `PATH`，會蓋掉 server 的 `python3`）。
+- 用 `PYTHONPATH=<worktree>/python` 蓋過 image 的 sglang；baseline 和 A/B 的兩邊都要用同一個 `PYTHONPATH`。
+
+## Monokernel（sgl-amd-mono）
+
+1106 image 的 sgl-amd-mono 是 11/04 的 `e52803f`，沒有 #71、#98、#100，**也就是沒有 MTP verify**。我們用 MTP5，所以用 image 原本的 mono，monokernel 一個 step 都接不到。更新方式：
+
+1. 用固定在 upstream main 的 worktree：`/shared_nfs/jacchang/exp/sgl-amd-mono-main1107`（`25723f1`，含 #71、#97、#98、#100）。要更新時：`git -C /shared_nfs/jacchang/exp/sgl-amd-mono-iscore fetch https://github.com/sgl-project/sgl-amd-mono.git main:refs/remotes/upstream/main`，再開新的 worktree。
+2. 放在 `PYTHONPATH` 最前面：`PYTHONPATH=$MONO:$SGL/python`。image 的 mono 是 editable install，plugin entry point（`sglang.srt.plugins`）用模組名稱載入，所以會載到 `PYTHONPATH` 的版本；`pyproject.toml` 從 `e52803f` 到 `25723f1` 沒變，不用重裝。
+3. sglang 那邊要有 #46036 和 #46980（1106 image 都有，用 `c06e39c6ca` 當 base 的 stack 也有）。
+4. 啟動加 `--enable-amd-monokernel`。每條 lane 設各自的 `FLYDSL_RUNTIME_CACHE_DIR`。
+5. container 裡確認：`python3 -c "import sgl_amd_mono; print(sgl_amd_mono.__file__)"` 要指到 worktree。
+
+monokernel 只在下面條件都成立時接手，否則 server log 會印 `monokernel: <原因>: the normal forward`，整個 step 走 SGLang 原本的 forward：
+
+| 條件 | 值 | 跟目前 Agentic recipe 的關係 |
+|---|---|---|
+| `--kv-cache-dtype` | `auto` 或 `bfloat16` | **recipe 是 `fp8_e4m3`，monokernel 會被關掉**；開 monokernel 時要改回 BF16 KV |
+| KV offload（HiCache） | **不接受**：開 `--enable-hierarchical-cache` 時啟動就 `ValueError: --enable-amd-monokernel cannot run this setup: KV offload is in use and the spec does not accept it`（11/07 實測） | **recipe 在 conc 64 開 HiCache 216 GB，所以 conc 64 不能開 monokernel**；conc ≤32 沒開 HiCache，可以 |
+| 每個 step 的 rows | ≤16（`25723f1` 的寬度是 1–16 每一個）；TP2 ≤4 | MTP5 一個 request 6 rows，**最多 2 個 request**（log：`runs target_verify steps of batch size [1, 2] x 6 tokens (2 of 29 captured decode graphs)`）；MTP3 最多 4 個。conc 64 的 decode batch 幾乎都超過，只有低 concurrency 用得到 |
+| MTP 設定 | `speculative_eagle_topk 1`，draft tokens = steps + 1 | recipe 符合 |
+| `--moe-runner-backend` | `auto` 或 `aiter` | 符合 |
+| env | `SGLANG_SIMULATE_UNIFORM_EXPERTS`、`SGLANG_SIMULATE_ROUND_ROBIN_EXPERTS`、`SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK`、`SGLANG_ENABLE_PP_SPEC` 都要關 | recipe 的 `SGLANG_SIMULATE_ACC_*` 不在這個清單，沒關係 |
+| 其他 | 不開 HiSparse、linear ReplaySSM；KDA verify backend 不是 FlashInfer；page size 256 或預設；Quark checkpoint；有 FlyDSL | 符合 |
+
+有生效時，server log 會印 `monokernel glm53_flash_hip on gfx950 runs ... (N of M captured decode graphs)`。
 
 ## 手動步驟（recipe 沒做的）
 
-**MoE tuned CSV。** recipe 沒有設 `AITER_CONFIG_FMOE`，忘了傳就是沒有 tuned CSV（30 分鐘 run 的 TPUT 和 P90 分別差約 1.8% 和 4.8%）。兩個 CSV 在 60 分鐘 run 的差異在 noise 內：
+**MoE tuned CSV。** 1106 image 的 aiter 還是 `285579b62`，沒有 #6435。recipe 沒有設 `AITER_CONFIG_FMOE`，忘了傳就是沒有 tuned CSV（30 分鐘 run 的 TPUT 和 P90 分別差約 1.8% 和 4.8%）。兩個 CSV 在 60 分鐘 run 的差異在 noise 內：
 
 | 選項 | CSV | 額外步驟 |
 |---|---|---|
@@ -61,9 +134,16 @@ stack 裡的 commit 是當時的 PR head 套在 `2815eed49c` 上再搬到 `5ef99
 
 傳法：`AITER_CONFIG_FMOE` = image 預設清單（`/sgl-workspace/aiter/aiter/configs/tuned_fmoe.csv` 加上 `model_configs/` 下所有 `*fmoe*.csv`，用 `:` 串起來）再接上選的 CSV，當 `lane_env_dur.sh` 的第 5 個參數（`KEY=VALUE`）傳進去。完整字串見 `/shared_nfs/jacchang/agentic_1106/driver.log`。
 
-**env（lane 腳本 export）。** `SGLANG_ROCM_FUSED_AR_MHC_POST=1`（#42020）、`SGLANG_OPT_GLM53_KDA_PTPC_MODULES=qkv_proj,f_a_proj,g_a_proj,o_proj`（#38764）。`HSA_NO_SCRATCH_RECLAIM=1` 維持 image 預設，不要改。
+**env 一覽**（沒設就等於 PR 沒開）：
 
-**driver 參數。** `--conc 64 --mtp-steps 5 --dsa-backend triton --mamba-ratio 0.5 --hicache-size 216 --hicache-io kernel`。BCG 的 `--cuda-graph-backend-prefill breakable --cuda-graph-max-bs-prefill 2560`、FP8 KV、INT4 quick-reduce 已經寫在 recipe 裡。
+| env | PR | 值 |
+|---|---|---|
+| `SGLANG_OPT_GLM53_KDA_PTPC_MODULES` | #38764 | `qkv_proj,f_a_proj,g_a_proj,o_proj` |
+| `SGLANG_DSA_FUSE_HADAMARD_QUANT` | #44661 | `1` |
+| `AITER_CONFIG_FMOE` | MoE CSV | 見上 |
+| `HSA_NO_SCRATCH_RECLAIM` | — | 維持 image 預設 `1`，不要改 |
+
+**server flag / driver 參數。** `--conc 64 --mtp-steps 5 --dsa-backend triton --mamba-ratio 0.5 --hicache-size 216 --hicache-io kernel`。BCG 的 `--cuda-graph-backend-prefill breakable --cuda-graph-max-bs-prefill 2560`、INT4 quick-reduce 已經寫在 recipe 裡。recipe 的 `--kv-cache-dtype fp8_e4m3` 在新 stack 要配 TileLang DSA，或用 `--server-arg` 改成 BF16 KV（見「FP8 KV」）。monokernel 的 `--enable-amd-monokernel` 要另外加，而且要配 BF16 KV。
 
 ## B200 對照
 
@@ -75,18 +155,39 @@ B200 用 stock image，不疊 PR。60 分鐘的對照點是 `lmsysorg/sglang:v0.
 
    ```bash
    GH="env -u GH_TOKEN -u GITHUB_TOKEN /home/jacchang/bin/gh"
-   for p in 41615 41871 42020 38764 44415 44416 44417 46036 46808 48875; do
+   for p in 41615 41871 38764 44415 44416 44417 46808 48875 44659 44661; do
      $GH pr view $p --repo sgl-project/sglang --json number,state,headRefOid \
        --jq '"#\(.number) \(.state) \(.headRefOid[0:10])"'
    done
    ```
 
-2. 換 image 時，先在 container 裡查 image 內的 sglang / aiter commit，再用 `git merge-base --is-ancestor` 判斷哪些 merged PR 已經在 image 裡，在的就從 stack 拿掉。
-3. open PR 的 head 有更新時，先問使用者要不要改疊新 head；改了就要重跑 GSM8K。沒改就在報告寫明用的是舊 head。
-4. 開跑後確認生效訊號（上表「生效怎麼看」），至少看 server log 的 `E=289, topk=9` 和一份 decode trace。
-5. 重跑完更新這份文件的「最後更新」和狀態欄。
+2. 換 image 時：查 image 內的 sglang、aiter、sgl-amd-mono commit，用 `git merge-base --is-ancestor` 判斷 merged PR 在不在；在的就從 stack 拿掉，mono 夠新就不用 `PYTHONPATH` 蓋。
+3. 用 `tools/build_glm53_prstack.sh` 重建 stack；有衝突先問使用者要不要解、怎麼解。
+4. 對照「每個 PR 怎麼啟用」：env 有沒有設、flag 有沒有加、條件有沒有成立（例如 FP8 KV 和 monokernel 互斥）。
+5. 開跑後確認生效訊號，至少看 server log 的 `E=289, topk=9`、monokernel 的那行 log 和一份 decode trace。
+6. 跑完更新這份文件的「最後更新」和表格。
 
 ## 舊 image 的 PR stack（歷史紀錄）
+
+### 1026 image（11/06 Agentic 數字用的這套）
+
+Image `rocm/sgl-dev:v0.5.22-rocm10-mi35x-20261026`，image 內 sglang `5ef99013ac`、aiter `285579b62`。sglang tree `/shared_nfs/jacchang/exp/sglang-fp8kv-1103`，branch `glm53-1105-bcg-hybrid-dsa`，HEAD `b1c1c92cdc`（`5ef99013ac` 上 14 個 commit）。mono tree `/shared_nfs/jacchang/exp/sgl-amd-mono-iscore`（branch `glm53-flash-dsa-iscore-req`）放在 `PYTHONPATH` 最前面，但 Agentic recipe 沒開 monokernel。啟動鏈：`/shared_nfs/jacchang/agentic_1106/lane_env_dur.sh`（`DUR` 秒數，預設 1800）→ `ix_agentx_glm53flash.sh --platform mi355x` → `recipe_glm53flash_fp4_mi355x_sglang_mtp.sh`。
+
+stack 裡是當時的 PR head（套在 `2815eed49c` 上再搬到 `5ef99013ac`），依序：
+
+| PR | stack 用的 head | 11/07 的 head |
+|---|---|---|
+| #41615 | `acca6a72db` | 相同 |
+| #41871 | `ac5057efad` | `2f3232f34d` |
+| #42020 | `bd5ddf3358`，改接 `ExitDecision(sum_in_reduce_scatter)` API | 相同（closed） |
+| #38764 | `1d33eed202` | `c8c963cf0f` |
+| #44415 | `4272d975f1` | `2e8c7f9b39` |
+| #44416 | `9b1d711bba` | `3d692f0a25` |
+| #44417 | `60336705fe` | `8499d23086` |
+| #46036 | `f73a82b40e` | merged |
+| #46808 | 3 個 commit `2514ded128`、`d41967ade8`、`42665af0e0` | 內容相同 |
+| 沒有 PR | `f0a7a579d5` FP8 KV on Triton sparse MLA | — |
+| #48875 | `e4cd94409d`、`b1c1c92cdc` | `c9670de08c`（同內容 rebase 到 main） |
 
 ### 1012 image
 
@@ -105,11 +206,4 @@ Image `rocm/sgl-dev:v0.5.21-rocm10-mi35x-20261012` 內建 sglang `d1357bf87b`、
 | aiter #5982 | GLM-5.3 TP4 fused KDA in-proj BF16 GEMM tuning | merged | 沒有，手動複製 CSV |
 | aiter #6276 | gfx950 `sparse_mla` bf16 KV-tile store 去 bank conflict | merged | 沒有，也沒補；只影響 `aiter_sparse_mla` |
 
-PR stack 在 `~/PR/wt-glm53-1012-prstack`（branch `glm53-1012-prstack`，依序疊 #41615、#41871、#42020、#38764）。啟動方式見 `~/SGLang-benchmarks/tmp/agentic_1014/run_triton.sh`：
-
-- 把 `$TREE/python` 複製到 container 的 `/root/ab_trees/prstack`，用 `PYTHONPATH` 蓋過 image 的 sglang。
-- 把 aiter#5933 的 `GEMM-A16W16-N=288-K=4096.json` 與 aiter#5982 的 `glm53_flash_bf16_{tuned,untuned}_gemm.csv` 複製進 image 的 aiter。
-- 環境變數：`SGLANG_ROCM_FUSED_AR_MHC_POST=1`、`SGLANG_OPT_GLM53_KDA_PTPC_MODULES=qkv_proj,f_a_proj,g_a_proj,o_proj`。
-- DSA backend：`--dsa-prefill-backend triton --dsa-decode-backend triton`（Agentic 腳本是 `--dsa-backend triton`）。
-
-在 1012 image 的 container 裡可以這樣確認哪些 PR 生效：server log 有 `Shared experts fusion optimization enabled.` 與 `E=289, topk=9`；decode trace 有 `smallm_p2_i512_s9`（#41871）、`allreduce_mhc_post_large_m_kernel`（#42020）、`_sparse_mla_decode_split_kernel`（Triton DSA）。
+PR stack 在 `~/PR/wt-glm53-1012-prstack`（branch `glm53-1012-prstack`，依序疊 #41615、#41871、#42020、#38764）。啟動方式見 `~/SGLang-benchmarks/tmp/agentic_1014/run_triton.sh`：把 `$TREE/python` 複製到 container 的 `/root/ab_trees/prstack`，用 `PYTHONPATH` 蓋過 image 的 sglang；把 aiter#5933 的 `GEMM-A16W16-N=288-K=4096.json` 與 aiter#5982 的 `glm53_flash_bf16_{tuned,untuned}_gemm.csv` 複製進 image 的 aiter；env 同上。

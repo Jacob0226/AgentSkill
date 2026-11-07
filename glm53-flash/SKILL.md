@@ -47,9 +47,10 @@ AMD 的 `amd/GLM-5.3-Flash-Quark-MXFP4` **不是全部 MXFP4**，是三種精度
 **驗證基準**：架構內容是在 image `rocm/sgl-dev:v0.5.21-rocm10-mi35x-20261012`（sglang
 `d1357bf87b`、aiter `e7d2453f2`）加上當時的 PR stack 上驗證的。
 
-**重跑 benchmark 前先讀 `pr-stack.md`。** 它列出目前的 image、要自己疊的 sglang PR（含
-stack 用的 head 和生效訊號）、image 裡沒有的 aiter PR，以及 recipe 沒做的手動步驟
-（MoE tuned CSV、env）。漏掉任何一項，數字就跟之前的報告對不上。
+**重跑 benchmark 前先讀 `pr-stack.md`。** 它列出目前的 image 裡有哪些 merged PR、要自己疊的
+sglang PR 與每個 PR 怎麼啟用（env、server flag 或自動條件；套進 tree 不等於會生效）、
+monokernel 怎麼更新到含 MTP verify 的版本，以及 recipe 沒做的手動步驟（MoE tuned CSV、env）。
+漏掉任何一項，數字就跟之前的報告對不上。
 
 ## 一句話描述
 
@@ -120,7 +121,7 @@ MTP layer 不在 `kda_layers` 清單裡，所以它是 **MLA/DSA + MoE**。但�
 | `kda-linear-attention.md` | KDA 的 projection 清單、gated delta rule recurrence、state cache 大小、prefill/decode kernel |
 | `dsa-kpool-indexer.md` | k-pool indexer 的 pooling、tail 選取、top-k 展開、kernel 清單、和 GLM-5.2 indexer 對照 |
 | `serving-and-perf.md` | 啟動 flag、兩個 memory pool 的調參、MI355X TP4 實測數字、已知踩雷 |
-| `pr-stack.md` | MI355X 目前的 image、自己疊的 PR stack、aiter patch、手動步驟、重跑前檢查清單；舊 image 的 stack 留作歷史 |
+| `pr-stack.md` | MI355X 目前的 image 與其中的 merged PR、自己疊的 PR 與啟用方式、monokernel 更新、手動步驟、重跑前檢查清單；舊 image 的 stack 留作歷史 |
 
 ## 常見誤判（讀 trace / debug 前先確認）
 
