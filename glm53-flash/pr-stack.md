@@ -13,16 +13,19 @@ MI355X 的數字來自四層：**image、自己疊的 sglang PR stack、monokern
 | image 內 aiter | `285579b62`，**跟 1026 image 一樣，沒有更新** |
 | image 內 sgl-amd-mono | `/sgl-workspace/sgl-amd-mono`，editable install，`e52803f`（11/04） |
 | 其他 | FlyDSL 0.4.0、torch 2.11.0+rocm10.0.0、triton 3.8.0；image 預設 `HSA_NO_SCRATCH_RECLAIM=1`、`SGLANG_USE_AITER=1` |
-| sglang stack | `~/PR/wt-glm53-1106-prstack`，branch `glm53-prstack-c06e39c6ca`，HEAD `94f7a7ece1`：`c06e39c6ca` 上 9 個 commit（一個 PR 一個），見「1106 stack 的解衝突紀錄」 |
+| sglang stack | `~/PR/wt-glm53-1106-prstack`，branch `glm53-prstack-c06e39c6ca`，HEAD `09111fe9a3`：`c06e39c6ca` 上 10 個 commit（一個 PR 一個，全部是 11/07 的最新 head），見「1106 stack 的解衝突紀錄」 |
 | mono | `/shared_nfs/jacchang/exp/sgl-amd-mono-main1107`（upstream main `25723f1`），見「Monokernel」 |
 | 驗證 | `/shared_nfs/jacchang/prstack_1107/`（node 150）：BF16 KV、Triton DSA、BCG、MoE CSV、兩個 env、MTP5。GPU 0–3 用 `run_gsm.sh`（HiCache 216 GB，不開 monokernel）；GPU 4–7 用 `run_gsm_mono.sh`（不開 HiCache，開 monokernel） |
 
 11/07 驗證結果（sgl-eval GSM8K，1319 threads、thinking、temperature 1.0、top-p 0.95；1026 stack 是 96.44%）：
 
-| lane | GSM8K | stop rate | 99,840 prefix + 16 / 512 / 4096 new tokens 的 prefill |
-|---|---|---|---|
-| stack（HiCache） | 96.66% | 99.55% | 38.8 / 52.9 / 137.4 ms |
-| stack + monokernel（無 HiCache） | 97.19% | 99.85% | 37.4 / 51.9 / 135.2 ms |
+| lane | sglang | GSM8K | stop rate | 99,840 prefix + 16 / 512 / 4096 new tokens 的 prefill |
+|---|---|---|---|---|
+| stack，BF16 KV（HiCache） | `94f7a7ece1`（沒有 #48806） | 96.66% | 99.55% | 38.8 / 52.9 / 137.4 ms |
+| stack + monokernel，BF16 KV（無 HiCache） | `94f7a7ece1` | 97.19% | 99.85% | 37.4 / 51.9 / 135.2 ms |
+| stack，**FP8 KV**（HiCache，即 recipe 設定） | `09111fe9a3`（含 #48806） | 97.12% | 99.24% | 37.9 / 52.3 / 133.3 ms |
+
+FP8 KV 的 device KV 是 23,792,128 tokens，BF16 是 12,267,264（同樣 132.84 GB）。
 
 1319 threads 下 decode batch 大多超過 2 個 request，monokernel 只在尾段接手，所以這個 GSM8K 主要驗證的是開 monokernel 時 stack 沒壞。
 
@@ -51,7 +54,8 @@ MI355X 的數字來自四層：**image、自己疊的 sglang PR stack、monokern
 
 | PR | 內容（效果） | 怎麼啟用 | 生效怎麼看 |
 |---|---|---|---|
-| sglang #41615 | Triton sparse MLA（TTFT −10%） | **server flag**：`--dsa-prefill-backend triton --dsa-decode-backend triton`（driver 是 `--dsa-backend triton`；recipe 預設是 `tilelang`）。**只接受 BF16 KV**：配 FP8 KV 時啟動就 `ValueError: Triton with index_kpool > 1 is only validated ... BF16 Q/KV`，見下方「FP8 KV」 | decode trace 有 `_sparse_mla_decode_split_kernel` |
+| sglang #41615 | Triton sparse MLA（TTFT −10%） | **server flag**：`--dsa-prefill-backend triton --dsa-decode-backend triton`（driver 是 `--dsa-backend triton`；recipe 預設是 `tilelang`）。只有 #41615 時**只接受 BF16 KV**（FP8 KV 啟動就 `ValueError: Triton with index_kpool > 1 is only validated ... BF16 Q/KV`）；FP8 KV 要再疊 #48806 | decode trace 有 `_sparse_mla_decode_split_kernel` |
+| sglang #48806 | Triton sparse MLA 接受 FP8 E4M3 KV（KV 容量 ×2；Agentic conc 64 HiCache write_back：tok/s +7.0%、P90 +8.4%）；取代內部的 `f0a7a579d5` | **server flag**：`--kv-cache-dtype fp8_e4m3` 加 #41615 的 Triton DSA flag。依賴 #41615，PR branch 帶著 #41615 的 commit，所以**只疊它自己的 `0ef818ced9` + `3d10677084`**（`gh pr diff` 會把 #41615 再疊一次）。PR 建議沒開 HiCache 時維持 BF16 KV；開 monokernel 時也只能 BF16 KV | 啟動沒有 `ValueError`；log 的 `kv_cache_dtype='fp8_e4m3'`，KV token 數約是 BF16 的 2 倍 |
 | sglang #41871 | small-M MoE + sort 融合 MXFP4 quant（conc 4 ITL −4.6%） | 自動：Quark MXFP4、TP4 shape、每步 ≤16 token、`--moe-runner-backend aiter` | decode trace 有 `smallm_p2_i512_s9` |
 | sglang #44415 | MoE correction bias 保持 fp32（bug fix） | 自動：`model_type == glm5_next_text` | — |
 | sglang #44416 | one-launch MoE router + 較窄 KDA V tile（P90 +5.8 ~ 6.5%）；**已包含 #44415 的 commit，疊它就不用再疊 #44415** | 自動：gfx950、每步 ≤16 token、`SGLANG_USE_AITER=1`（image 預設）；`SGLANG_SIMULATE_UNIFORM_EXPERTS` / `ROUND_ROBIN_EXPERTS` 或 expert remapping 開著時退回原路徑 | decode trace 有 smallm router kernel，沒有獨立的 gate GEMM + topk |
@@ -66,13 +70,13 @@ MI355X 的數字來自四層：**image、自己疊的 sglang PR stack、monokern
 | 項目 | 原本的作用 | 拿掉的影響 |
 |---|---|---|
 | sglang #42020（stale bot 10/25 關閉） | FFN all-reduce + `hc_post` 融合，env `SGLANG_ROCM_FUSED_AR_MHC_POST=1` | 這個 env 在新 stack 沒有作用，不用再設 |
-| `f0a7a579d5`（沒有 PR） | 讓 #41615 的 Triton sparse MLA 接受 FP8 e4m3 KV | 見下方「FP8 KV」 |
+| `f0a7a579d5`（內部 commit，沒有 PR） | 讓 #41615 的 Triton sparse MLA 接受 FP8 e4m3 KV | 被 #48806 取代，不要再疊 |
 
-**FP8 KV。** 新 stack 裡 `--kv-cache-dtype fp8_e4m3` 和 Triton DSA 不能同時用（啟動就 `ValueError`）。recipe 寫死 `--kv-cache-dtype fp8_e4m3`，driver 又傳 `--dsa-backend triton`，所以照舊的 driver 參數會起不來。二選一：BF16 KV + Triton DSA（從 driver 多傳 `--server-arg --kv-cache-dtype --server-arg bfloat16`，額外參數接在 recipe 後面，後出現的生效），或 FP8 KV + TileLang DSA（driver 改 `--dsa-backend tilelang`）。monokernel 只吃 BF16 KV，所以要開 monokernel 就是前者。
+**FP8 KV。** 有 #48806 之後，recipe 寫死的 `--kv-cache-dtype fp8_e4m3` 配 driver 的 `--dsa-backend triton` 可以直接跑。要 BF16 KV 時（例如開 monokernel，或沒開 HiCache 的 conc），從 driver 多傳 `--server-arg --kv-cache-dtype --server-arg bfloat16`（額外參數接在 recipe 後面，後出現的生效）。
 
 ### 1106 stack 的解衝突紀錄
 
-11/07 用 `tools/build_glm53_prstack.sh` 在 image 的 `c06e39c6ca` 上依序疊。#41871、#46808、#44659、#48875 直接套上；其餘的衝突這樣解（重建時照做）：
+11/07 用 `tools/build_glm53_prstack.sh` 在 image 的 `c06e39c6ca` 上依序疊。#41871、#46808、#44659、#48875、#48806 直接套上；其餘的衝突這樣解（重建時照做）。疊完 #48806 後，`triton_sparse_mla.py` 跟 #48806 head 的版本只差 #41615 解衝突留下的縮排，直接 `git checkout pr/48806 -- python/sglang/kernels/ops/attention/dsa/triton_sparse_mla.py`（#48806 作者在自己的 merge `182ffa5f6f` 裡也是這樣解 #44503 和 #44322 的衝突）。
 
 | PR | 衝突 | 怎麼解 |
 |---|---|---|
@@ -89,11 +93,12 @@ MI355X 的數字來自四層：**image、自己疊的 sglang PR stack、monokern
 ## 建 stack
 
 ```bash
-# 預設依序疊：41615 41871 38764 44416 44417 46808 44659 44661 48875
+# 預設依序疊：41615 41871 38764 44416 44417 46808 44659 44661 48875 48806:0ef818ced9,3d10677084
 ~/SGLang-benchmarks/tools/build_glm53_prstack.sh <image sglang commit> <worktree> [entry...]
 ```
 
-- 每個 PR 用 `gh pr diff`（PR 自己的改動），不會把 PR branch merge 進來的 main commit 帶進來；`c:<commit>` 是只在內部 tree 的 commit。
+- **永遠用 PR 的最新 head。** 重建時一律 fetch 當下的 head，不要沿用舊 stack 的 commit；head 變了就重建、重解衝突、重跑 GSM8K。
+- 每個 PR 用 `gh pr diff`（PR 自己的改動），不會把 PR branch merge 進來的 main commit 帶進來。PR branch 帶著另一個 PR 的 commit 時（#48806 帶著 #41615），用 `<PR>:<commit>,<commit>` 只疊它自己的 commit；PR 有新的 commit 時，要把它自己的新 commit 加進清單（merge commit 不用，衝突自己解）。`c:<commit>` 是只在內部 tree 的 commit。
 - 第一個套不上的 PR 會停下來，衝突留在 worktree 裡。解完 `git add` + commit 後，用剩下的 entry 再跑一次。
 - base 用 image 的 sglang commit，跟 image 的 aiter、sglang-kernel 對得上。用更新的 main 衝突會變少，但要確認 image 的 aiter 撐得住。
 - 解完衝突的 stack 要先過 GSM8K，再跑 benchmark。**1106 image 沒有 `sgl-eval`**，在 container 裡裝到獨立 venv（不要裝進 `/opt/venv`，會改到 openai 等套件）：`python3 -m venv /root/sgl_eval_venv && /root/sgl_eval_venv/bin/pip install "git+https://github.com/sgl-project/sgl-eval.git@a231b7a439b235090ff7baa30778fa2b514309ae"`，再 `cp -r /home/jacchang/.cache/sgl_eval /root/.cache/`，用 `/root/sgl_eval_venv/bin/sgl-eval` 的完整路徑呼叫（不要把 venv 的 `bin` 放進 `PATH`，會蓋掉 server 的 `python3`）。
@@ -143,7 +148,7 @@ monokernel 只在下面條件都成立時接手，否則 server log 會印 `mono
 | `AITER_CONFIG_FMOE` | MoE CSV | 見上 |
 | `HSA_NO_SCRATCH_RECLAIM` | — | 維持 image 預設 `1`，不要改 |
 
-**server flag / driver 參數。** `--conc 64 --mtp-steps 5 --dsa-backend triton --mamba-ratio 0.5 --hicache-size 216 --hicache-io kernel`。BCG 的 `--cuda-graph-backend-prefill breakable --cuda-graph-max-bs-prefill 2560`、INT4 quick-reduce 已經寫在 recipe 裡。recipe 的 `--kv-cache-dtype fp8_e4m3` 在新 stack 要配 TileLang DSA，或用 `--server-arg` 改成 BF16 KV（見「FP8 KV」）。monokernel 的 `--enable-amd-monokernel` 要另外加，而且要配 BF16 KV。
+**server flag / driver 參數。** `--conc 64 --mtp-steps 5 --dsa-backend triton --mamba-ratio 0.5 --hicache-size 216 --hicache-io kernel`。BCG 的 `--cuda-graph-backend-prefill breakable --cuda-graph-max-bs-prefill 2560`、INT4 quick-reduce 已經寫在 recipe 裡。recipe 的 `--kv-cache-dtype fp8_e4m3` 靠 #48806 才能配 Triton DSA（見「FP8 KV」）。monokernel 的 `--enable-amd-monokernel` 要另外加，而且要配 BF16 KV、不開 HiCache。
 
 ## B200 對照
 
@@ -155,14 +160,14 @@ B200 用 stock image，不疊 PR。60 分鐘的對照點是 `lmsysorg/sglang:v0.
 
    ```bash
    GH="env -u GH_TOKEN -u GITHUB_TOKEN /home/jacchang/bin/gh"
-   for p in 41615 41871 38764 44415 44416 44417 46808 48875 44659 44661; do
+   for p in 41615 41871 38764 44415 44416 44417 46808 48875 44659 44661 48806; do
      $GH pr view $p --repo sgl-project/sglang --json number,state,headRefOid \
        --jq '"#\(.number) \(.state) \(.headRefOid[0:10])"'
    done
    ```
 
 2. 換 image 時：查 image 內的 sglang、aiter、sgl-amd-mono commit，用 `git merge-base --is-ancestor` 判斷 merged PR 在不在；在的就從 stack 拿掉，mono 夠新就不用 `PYTHONPATH` 蓋。
-3. 用 `tools/build_glm53_prstack.sh` 重建 stack；有衝突先問使用者要不要解、怎麼解。
+3. 用 `tools/build_glm53_prstack.sh` 以**最新 head** 重建 stack（不用問）；#48806 這類只疊自己 commit 的 PR，先看 PR 有沒有新的非 merge commit。有衝突先問使用者要不要解、怎麼解。
 4. 對照「每個 PR 怎麼啟用」：env 有沒有設、flag 有沒有加、條件有沒有成立（例如 FP8 KV 和 monokernel 互斥）。
 5. 開跑後確認生效訊號，至少看 server log 的 `E=289, topk=9`、monokernel 的那行 log 和一份 decode trace。
 6. 跑完更新這份文件的「最後更新」和表格。
