@@ -54,6 +54,8 @@ python3 ~/SGLang-benchmarks/tools/agentic_tail.py \
 
 ### 2. 判斷，再決定 profile 什麼
 
+有對手資料時，直接比 P85–P95 的 step 部分和 stall 部分，哪個差得多就是主因（見第 3 步）。只有自己的資料時，先用 stall share 粗判：
+
 | P85–P95 的 stall share | 主因 | 要 profile 的東西 |
 |---|---|---|
 | < 20% | decode | fixed-length decode，conc = 該群的 decode batch p50（也看 p10 / p90），input ≈ 該群 ISL，MTP 和 golden AL 跟 Agentic 一樣 |
@@ -62,9 +64,11 @@ python3 ~/SGLang-benchmarks/tools/agentic_tail.py \
 
 ### 3. 跨平台比較
 
-- 兩邊跑同一個分析。B200 的 run 要保留 `profile_export.jsonl`，不然只剩 server log 那張 per-batch 速度表。
+- **兩邊都要有 `profile_export.jsonl`**，一起跑 `agentic_tail.py`。只有一邊有時，不要下結論：
+  - 只看自己的 stall share 會高估 prefill 的影響，因為對方的 stall 可能更多。
+  - server log 的 per-batch 速度包含 stall。對方 stall 比較多時，它的數字會被拉慢，看起來和你一樣快，其實它的 decode 比較快。
+- 最乾淨的 decode 指標是 P85–P95 那群的 **median chunk gap**（每個 decode step 的時間，tokens / chunk 相同時可以直接比）。
 - 先比設定再怪 kernel。例如 B200 golden AL 線在 conc 32/64 用了 `--prefill-max-requests 1`、`--mamba-full-memory-ratio 1.5`、conc 32 就開 HiCache 216；MI355X 的 conc 32 沒有 HiCache。
-- per-batch 速度相同、P90 卻輸，代表輸在 stall 或 batch 分布，不是 decode kernel。
 
 ### 4. 驗證
 
@@ -85,19 +89,23 @@ python3 ~/SGLang-benchmarks/tools/agentic_tail.py \
 MI355X 1106 + PRs + Mono（conc 16–64 沒有 mono，FP8 KV，MTP5 golden 3.56）vs B200 v0.5.23 golden AL。資料：
 
 - MI355X：`~/SGLang-benchmarks/results/amd_GLM-5.3-Flash-Quark-MXFP4/rocm_sgl-dev-v0.5.23-rocm10-mi35x-20261106/bench-Agentic-TP4_EP1-mtp5-prstack09111fe9a3-pr6435-1107-golden3.56-dsa-triton/`
-- B200：`/shared_nfs/jacchang/b200_agentic/v0523-hc216-golden-line/`（只有 server log，沒有 `profile_export.jsonl`）
+- B200：`/shared_nfs/jacchang/b200_agentic/v0523-hc216-golden-line/`（`profile_export.jsonl` 從 dgx-021 的原始目錄拷來）
+- 完整輸出：`/shared_nfs/jacchang/prof_1108/agentic_tail_mi_vs_b200.md`
+
+P85–P95（決定 P90 的那群 request），MI / B200：
 
 | | conc 16 | conc 32 | conc 64 |
 |---|---|---|---|
-| P90 Int MI / B200 | 220.9 / 232.1 | 143.1 / 158.0 | 59.5 / 62.5 |
-| MI P85–P95 的 decode batch p10/p50/p90 | 3 / 6 / 9 | 8 / 16 / 19 | 32 / 47 / 61 |
-| MI P85–P95 的 TPOT：step + stall（ms） | 3.93 + 0.61 | 5.43 + 1.70 | 9.67 + 7.37 |
-| MI P85–P95 的 stall share | 13% | 24% | 43% |
-| MI P90 Int 拿掉 stall | 256 | 180 | 99 |
-| per-user ms/token p50，MI / B200 | bs 5–8：3.86 / 3.50 | bs 13–16：5.87 / 5.63 | bs 33–48：11.52 / 11.51 |
+| P90 Int | 220.9 / 232.1 | 143.1 / 158.0 | 59.5 / 62.5 |
+| decode batch p10/p50/p90 | 3/6/9 / 3/6/8 | 8/16/19 / 7/14/18 | 32/47/61 / 32/44/56 |
+| ISL（k） | 148 / 128 | 147 / 147 | 125 / 116 |
+| median chunk gap（ms，每個 decode step） | 13.64 / 11.77 | 18.41 / 15.29 | 31.48 / 24.86 |
+| TPOT step 部分（ms） | 3.93 / 3.16 | 5.43 / 4.20 | 9.67 / 7.03 |
+| TPOT stall 部分（ms） | 0.61 / 1.21 | 1.70 / 2.26 | 7.37 / 9.16 |
 
 解讀：
 
-- **conc 16 輸在 decode**。P90 來自 decode batch 約 6（3–9）、ISL 約 150k 的 request。MI 在 bs 1–8 每個 token 慢約 10%。
-- **conc 32 兩者都有**。P90 來自 decode batch 約 16，stall 占 24%。
-- **conc 64 輸在 prefill**。P90 來自 decode batch 約 47，stall 占 43%；bs 33–64 的 decode 速度和 B200 一樣。
+- **三個 conc 都輸在 decode step**，B200 的 stall 反而比較多。MI 每個 decode step 慢 16%（bs 約 6）、20%（bs 約 15）、27%（bs 約 45），batch 越大差距越大。
+- 要 profile 的 decode batch 是 6、16、48，context 約 128k。
+- MI 的 decode batch 也略大（回饋效應），修好 decode step 之後會連帶變小。
+- 只看 MI 一邊時曾誤判「conc 64 輸在 prefill」（MI stall 占 43%，server log 在 bs 33–48 速度也和 B200 相同）。加入 B200 的逐 request 資料後才知道錯了，這就是「兩邊都要有 jsonl」那條的由來。
