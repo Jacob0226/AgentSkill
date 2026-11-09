@@ -100,9 +100,13 @@ The mechanism, then the change. Most SGLang PRs are performance work, so lead wi
 current code costs what it costs* — a reviewer who understands the mechanism can predict the
 speedup without reading the diff. Symptom-first summaries ("X is slow") waste the budget.
 
-Carry the evidence in **one** table: the kernel, the key, or the counter that moves. One table
-only — a second one in the same section reads as two competing summaries and the reviewer has to
-work out which is the point. If the detail does not fit, it belongs in Scope or Test plan.
+**No performance numbers in Summary.** Latency, throughput, interactivity and kernel times all
+live in Test plan; repeating them in Summary makes the reviewer read the same numbers twice and
+check that the two copies agree. Summary says what was wrong and what the change does.
+
+Summary may carry **one** table when it explains the mechanism better than prose: which kernel
+or path runs before and after, the key or counter that changes, the shape that falls through a
+gate. One table only — a second one reads as two competing summaries. Never a table of speedups.
 
 ### Scope
 
@@ -116,8 +120,23 @@ when they are untouched.
 Name the exact base first, or the numbers mean nothing: the docker image tag and the PR stack
 applied on top of it. Then state which **single variable** separates the two builds.
 
-Tables follow: end-to-end latency, then kernel-level attribution if the change is a kernel
-change, then accuracy.
+Then the results, **kernel level first, end to end second, accuracy last**. The kernel level
+shows the change landed where the mechanism predicts; the end-to-end level shows what that buys.
+When both levels exist, split them into bullet items, each holding its tables, and name the
+benchmark in the end-to-end item:
+
+```markdown
+* Kernel Level
+
+  | ... kernel or single-forward table ... |
+
+* E2E Level: AgentX
+
+  | ... benchmark table ... |
+```
+
+Use `E2E Level: bench_serving` (or the benchmark's name) for fixed-length runs. With only one
+level, skip the bullets. Accuracy and unit tests follow in a `Check | Result` table.
 
 ## Rules
 
@@ -147,20 +166,18 @@ Numbers come from `~/SGLang-benchmarks/` bench logs and the step3 trace workbook
 
 ## Worked example
 
-[#32888](https://github.com/sgl-project/sglang/pull/32888), condensed. A chunked-prefill
-change: this is the shape a performance PR should take. Its sections run near 50 words, well
-inside the cap — treat 100 as the ceiling, not the target.
+[#32888](https://github.com/sgl-project/sglang/pull/32888), condensed and rearranged to these rules. A chunked-prefill change: this is the shape a performance PR should take. Its sections run near 50 words, well inside the cap — treat 100 as the ceiling, not the target.
 
 ```markdown
 ## Summary
 
 A prefill batch never reaches `chunked_prefill_size`: `_update_prefill_budget` charges the page-ceiled extend length, and `add_one_req` floors the last truncation back to a page. On gfx95, landing 16 tokens short doubles the MLA absorb bmm — its `EVEN_MN` heuristic is a compile-time `constexpr`, so a misaligned M selects a different compiled binary.
 
-|                        | before             | after              |
-| ---------------------- | ------------------ | ------------------ |
-| trace token annotation | `toks=16350`       | `toks=16384`       |
-| MLA absorb bmm         | 311.2 us @ M=16368 | 155.8 us @ M=16384 |
-| instructions           | 3819               | 1562               |
+|                        | before       | after        |
+| ---------------------- | ------------ | ------------ |
+| trace token annotation | `toks=16350` | `toks=16384` |
+| MLA absorb bmm M       | 16368        | 16384        |
+| `EVEN_MN`              | false        | true         |
 
 `compute_charge` moves the compute budgets in raw tokens while the KV budgets stay page-ceiled.
 
@@ -170,40 +187,40 @@ gfx95 (MI355X) chunked prefill, gated on `SGLANG_EXACT_CHUNK_FILL` **and** gfx95
 
 ## Test plan
 
-Baseline `rocm/sgl-dev:v0.5.15.post1-rocm720-mi35x-20260714` plus six AMD PRs (#30519, #30575,
-#30715, #30808, #31323, #31324); this PR adds ROCm/aiter#4453. GLM-5.2-MXFP4, MI355X TP4,
-in8192 / out1024.
+Baseline `rocm/sgl-dev:v0.5.15.post1-rocm720-mi35x-20260714` plus six AMD PRs (#30519, #30575, #30715, #30808, #31323, #31324); this PR adds ROCm/aiter#4453. GLM-5.2-MXFP4, MI355X TP4, in8192 / out1024.
 
-| Concurrency | Mean TTFT base | this PR | Δ         | Median TPOT base | this PR | Δ         |
-| ----------- | -------------- | ------- | --------- | ---------------- | ------- | --------- |
-| 4           | 512.25         | 484.58  | **−5.4%** | 13.04            | 13.00   | −0.3%     |
-| 8           | 727.92         | 681.18  | **−6.4%** | 16.41            | 16.23   | −1.1%     |
-| 16          | 999.91         | 930.41  | **−7.0%** | 21.91            | 21.61   | **−1.4%** |
-| 32          | 1558.20        | 1442.90 | **−7.4%** | 31.00            | 30.37   | **−2.0%** |
-| 64          | 2742.82        | 2481.36 | **−9.5%** | 49.83            | 48.39   | **−2.9%** |
+* Kernel Level
 
-Mean TTFT improves monotonically with concurrency, which is what a shorter prefill should look like: the saving is per prefill forward, so the deeper the queue, the more of them a request waits behind.
+  MLA absorb bmm: 311.2 us (3819 instructions) → **155.8 us** (1562 instructions). Prefill kernel attribution, one forward at in8192 / concurrency 64:
 
-Prefill kernel attribution, one forward at in8192 / concurrency 64:
+  | Category                  | baseline (ms) | this PR (ms) | Δ          |
+  | ------------------------- | ------------- | ------------ | ---------- |
+  | dense/linear GEMM         | 173.15        | 107.18       | **−65.97** |
+  | sparse-MLA attn           | 177.39        | 179.49       | +2.10      |
+  | all-reduce/comm           | 134.31        | 134.79       | +0.48      |
+  | MoE moe1 + moe2 + routing | 143.81        | 144.59       | +0.78      |
+  | DSA indexer + topk        | 24.91         | 25.15        | +0.24      |
+  | rmsnorm/quant/act         | 26.09         | 25.83        | −0.26      |
+  | Σ kernel                  | 709.34        | 646.71       | −62.62     |
 
-| Category                  | baseline (ms) | this PR (ms) | Δ          |
-| ------------------------- | ------------- | ------------ | ---------- |
-| dense/linear GEMM         | 173.15        | 107.18       | **−65.97** |
-| sparse-MLA attn           | 177.39        | 179.49       | +2.10      |
-| all-reduce/comm           | 134.31        | 134.79       | +0.48      |
-| MoE moe1 + moe2 + routing | 143.81        | 144.59       | +0.78      |
-| DSA indexer + topk        | 24.91         | 25.15        | +0.24      |
-| rmsnorm/quant/act         | 26.09         | 25.83        | −0.26      |
-| Σ kernel                  | 709.34        | 646.71       | −62.62     |
+  Only dense/linear GEMM improves, as expected; the other categories shift within noise.
 
-Only dense/linear GEMM improves, as expected; the other categories shift within noise.
+* E2E Level: bench_serving
+
+  | Concurrency | Mean TTFT base | this PR | Δ         | Median TPOT base | this PR | Δ         |
+  | ----------- | -------------- | ------- | --------- | ---------------- | ------- | --------- |
+  | 4           | 512.25         | 484.58  | **−5.4%** | 13.04            | 13.00   | −0.3%     |
+  | 8           | 727.92         | 681.18  | **−6.4%** | 16.41            | 16.23   | −1.1%     |
+  | 16          | 999.91         | 930.41  | **−7.0%** | 21.91            | 21.61   | **−1.4%** |
+  | 32          | 1558.20        | 1442.90 | **−7.4%** | 31.00            | 30.37   | **−2.0%** |
+  | 64          | 2742.82        | 2481.36 | **−9.5%** | 49.83            | 48.39   | **−2.9%** |
+
+  Mean TTFT improves monotonically with concurrency, which is what a shorter prefill should look like: the saving is per prefill forward, so the deeper the queue, the more of them a request waits behind.
 
 **Accuracy:** GSM8K 0.933 → 0.927, single scoring pass each — within what one pass resolves.
 ```
 
-Note what the attribution table buys: it shows the saving landed *where the mechanism
-predicted* and nowhere else. A summary that claims a GEMM win and a table that shows attention
-also moving means the two builds differed in something else.
+Note what the kernel level buys: it shows the saving landed *where the mechanism predicted* and nowhere else, before the reader sees the end-to-end gain. A summary that claims a GEMM win and an attribution table that shows attention also moving means the two builds differed in something else.
 
 ## Opening the PR
 
