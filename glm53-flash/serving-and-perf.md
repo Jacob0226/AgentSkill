@@ -1,216 +1,79 @@
-# 啟動、調參與實測
+# Memory pool、啟動設定與踩雷
 
-## 兩個 memory pool 要一起看
+## 目前的設定在哪
 
-GLM-5.3-Flash 有 **兩個獨立的 pool**，concurrency 取兩者的較小值：
+不在這裡抄 flag 和實測數字，會過時。以這三處為準：
+
+| 內容 | 位置 |
+|---|---|
+| server flag | `~/SGLang-benchmarks/Agentic/recipe_glm53flash_fp4_{mi355x,b200}_sglang_mtp.sh` |
+| 每個 conc 的 mem-fraction、chunk、mamba、HiCache、ReplaySSM，以及每項的實測理由 | `~/SGLang-benchmarks/Agentic/ix_agentx_glm53flash.sh` 的 `conc_defaults()` 和上方註解 |
+| image、PR stack、env、手動步驟 | `pr-stack.md` |
+
+## 兩個 memory pool
 
 | Pool | 內容 | 隨 seq_len 成長？ |
 |---|---|---|
-| Paged KV pool（`DSATokenToKVPool`） | 11 層 MLA latent KV（512 元素/token/layer）+ pooled indexer FP8 K cache | **是** |
-| KDA state pool（`MambaPool`） | 34 層的 conv state + recurrent state | **否**，每 request 固定 |
+| KV pool（`DSATokenToKVPool`） | 11 層 MLA latent KV（512 元素 / token / layer）+ indexer FP8 K（每 4 token 一個） | 是 |
+| KDA state pool（`MambaPool`） | 34 層的 conv state + recurrent state，每個 slot 固定大小 | 否 |
 
-TP4 下的具體數字：
+TP4 每個 rank 的大小：
 
-- KDA state：**≈ 35.2 MiB（36.9 MB）/ sequence / rank**（固定，見 `kda-linear-attention.md`）
-- MLA KV + indexer：**≈ 11.3 KiB / token**（BF16 KV），64K context ≈ 727 MiB / sequence
-- 開 MTP 時還有一塊 intermediate SSM cache，量到約 16.6 GB / rank，跟 `--max-running-requests` 成正比
+| 項目 | 大小 | 說明 |
+|---|---|---|
+| 一個 KDA slot | 36.9 MB | recurrent state 34 × `(16, 128, 128)` fp32 = 35.65 MB，conv state 1.25 MB |
+| ReplaySSM ring | 每個 slot 再加 13.4 MB | 16 token（`--linear-replayssm-cache-len` 預設）× 34 層 × 24.6 KB |
+| intermediate SSM cache | (min(max-running, slots / r) + 1) × draft token 數 × 35.65 MB | 只在 MTP 且沒開 ReplaySSM 時有；max-running 80、6 個 draft token 約 16 GiB |
 
-哪個 pool 先滿看 context 長度與 `--mamba-full-memory-ratio`：
+啟動 log 的 `Mamba Cache is allocated` 印的 GB 其實是 GiB，所以用 GB ÷ slot 數會算出 33 MB，比實際的 36.9 MB 小。
 
-- 短 context、高 concurrency：常常是 **KDA state pool 先撐爆**。啟動 log 顯示
-  `max_running_requests` 被自動調降時，用 `--mamba-full-memory-ratio` 或
-  `--max-mamba-cache-size` 加大 KDA pool，再回頭調 `--max-running-requests`。
-- Agentic（長 context、高 prefix reuse）：反過來是 **KV pool 先滿**。conc 64、沒有 HiCache 時
-  KV pool 100% 滿；conc 32 在 2× max-running 下只到 49%。解法是把 mamba ratio 調低（0.5）、
-  max-running 從 128 降到 80（省下 MTP intermediate cache 給 KV），再開 HiCache。
+### slot 怎麼被用掉
 
-## MI355X / ROCm 啟動範例（PR #36607 的量測設定）
+- 每個 running request 固定占 4 個 slot（`extra_buffer` 加 overlap scheduler）。所有 AgentX run 的 `mamba num / #running-req` 中位數都是 4.00。
+- `Decode batch` log 的 `mamba num` 是 `capacity − available − evictable`，**不含 radix cache 裡可以 evict 的 prefix state**。所以 `mamba usage` 低，不代表 slot 給太多。
+- prefix 要命中，KV 和 mamba state 必須同時還在。哪個 pool 先滿，就由哪個開始 evict。
+- AgentX trace 的命中率上限約 95%。MI355X 的 KV 是 B200 的 3 倍，命中率也只有 95.0–95.3%。
 
-```bash
-export SGLANG_USE_AITER=1
-export SAFETENSORS_FAST_GPU=1
+### ratio 和固定 slot 數
 
-python3 -m sglang.launch_server \
-  --model-path /data/huggingface/hub/zai-org/GLM-5.3-Flash \
-  --tp-size 8 \
-  --context-length 65536 \
-  --kv-cache-dtype bfloat16 \
-  --moe-runner-backend aiter \
-  --dsa-prefill-backend tilelang \
-  --dsa-decode-backend tilelang \
-  --cuda-graph-backend-decode full \
-  --cuda-graph-bs-decode 1 32 \
-  --cuda-graph-backend-prefill disabled \
-  --disable-radix-cache \
-  --reasoning-parser glm45 \
-  --tool-call-parser glm47
-```
+兩種做法都是啟動時切一次，執行中不會再調整：
 
-完整腳本：`~/SGLang-benchmarks/pr36607_glm53flash.sh`（`TP` 與 `KV_DTYPE` 可用環境變數覆寫）。
+- `--mamba-full-memory-ratio r`：mamba 拿剩餘記憶體的 r / (1 + r)。沒開 ReplaySSM 時，intermediate cache 也從這份裡扣，但會被 max-running 截斷，用不完的部分回到 KV。開了 ReplaySSM 就沒有 intermediate，整份都拿去開 slot，KV 反而變少：B200 conc64 從 7.21M 掉到 5.47M token，P90 −7.3%。
+- `--max-mamba-cache-size N`：直接指定 slot 數，剩下的全給 KV，優先於 ratio。
+
+固定 slot 數的估法是 N ≈ 1.2 × 4 × decode batch 峰值 + 約 2 × conc，後半是留給 cache 的 session prefix state。改完要確認命中率沒有掉。只有在 KV 不夠的地方改才有好處：conc64 兩個平台都是，B200 conc32 也是（它會用 HiCache）。conc ≤ 32 的 MI355X 有 22M 以上的 KV，改了也沒收益。
+
+AgentX 的 decode batch 遠小於 conc，但 conc64 會因為 subagent fan-out 超過 64：
+
+| conc | decode batch p50 / p90 / 峰值 |
+|---|---|
+| 16 | 2 / 5 / 11 |
+| 32 | 5 / 10 / 24 |
+| 64 | 23–26 / 39–42 / 73–77 |
+
+所以 conc64 的 max-running 80 夠用，但餘量不大。
+
+## 已知踩雷
+
+- **`--cuda-graph-max-bs-decode` 要 ≥ `--max-running-requests`。** decode batch 超過 graph 的上限會改跑 eager mode，conc64 的 HBM 幾乎全滿，eager 需要的額外記憶體會讓它 crash。以前 conc64 的機率性 crash（RCCL `HSA_STATUS_ERROR_OUT_OF_RESOURCES`）就是 graph 上限設 64、max-running 設 80 造成的，跟 `HSA_NO_SCRATCH_RECLAIM` 無關。recipe 現在兩個都設 80。
+- **HiCache 吃的是 host memory。** TP4、`--hicache-size 216` 的一個 server 要約 900 GB host RAM（每個 rank 約 230 GB RSS）。同一個 node 跑兩條 lane 前，先用 `df -h /dev/shm` 和 `free -g` 確認空間，別人留下的 `/dev/shm` 檔（例如 `lmcache_l1_pool_*`）會讓 server 在配置 host pool 時被 OOM killer 殺掉（exit -9）。
+- MI355X 不要加 `--disable-shared-experts-fusion`。gfx950 TP4 上 shared expert 會被併進 routed MoE（`E=289, topk=9`），細節見 `SKILL.md`。
+- 第一次呼叫時，fused k-pool 和 AITER mHC kernel 會走 JIT compile，量 conc 1 之前一定要先 warmup。
+- `hc_*` 參數是 fp32，列在 `quantization_config.modules_to_not_convert` 裡。MTP block（`model.layers.45.*`）在 hybrid FP8 + NVFP4 checkpoint 裡是 BF16（列在 `quantization_config.ignore`），`_resolve_nextn_quant_config` 會處理。不要手動塞 FP8 quant config 給它，會 load 到沒有 scale 的 BF16 payload 而壞掉。
 
 ## CUDA / Blackwell 官方建議（cookbook）
 
 `docs/cookbook/autoregressive/GLM/GLM-5.3-Flash.mdx` 的要點：
 
-- **KV dtype 與 DSA backend 必須配對切換**。Blackwell 建議 FP8 KV + `trtllm` DSA
-  （GB300 上量到 throughput +2.3–5.5%、同樣 pool bytes 下 KV token 容量約 1.8 倍，
-  GSM8K 在誤差範圍內）；H100 / H200 預設 BF16 KV + `tilelang` DSA。
-  **TileLang DSA + FP8 KV 在 CUDA 上不是合法組合。**
-- MTP 用 `--speculative-algorithm NEXTN`，低延遲組合是
-  `--speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4
-  --speculative-adaptive`（`index_share_for_mtp_iteration` 需要 eagle-topk = 1）。
-  高 throughput 場景直接關掉 speculative decoding。
-- 多模態：processor 用 2 FPS 取樣、video 上限 240,000 visual token，要裝 `torchcodec`。
-  長影片在 4×GB300 上建議用 encoder disaggregation（`--encoder-only` + `--language-only`
-  + `--encoder-urls`）把 vision encoder 的 memory spike 隔離開。
-- **不要 override `linear_attn_config.gate_lower_bound`**，會改變數值。model 讀的是
-  `linear_attn_config["gate_lower_bound"]`；頂層 `linear_lower_bound` 只在 config 沒有
-  `linear_attn_config` 時才當 fallback，兩份 checkpoint 都有，所以改它沒有效果。
-- PD disaggregation 目前只用 dummy weight 機械性驗證過（prefill/decode 都要搬 paged DSA KV
-  *和* KDA recurrent state），且 PD + speculative decoding 起不來。
+- KV dtype 和 DSA backend 要配對切換。Blackwell 建議 FP8 KV + `trtllm` DSA；H100 / H200 預設 BF16 KV + `tilelang` DSA。CUDA 上 TileLang DSA + FP8 KV 不是合法組合。
+- 多模態：processor 用 2 FPS 取樣，video 上限 240,000 visual token，要裝 `torchcodec`。長影片在 4×GB300 上建議用 encoder disaggregation（`--encoder-only` + `--language-only` + `--encoder-urls`）隔離 vision encoder 的 memory spike。
+- PD disaggregation 只用 dummy weight 驗證過（prefill / decode 都要搬 paged DSA KV 和 KDA recurrent state），而且 PD + speculative decoding 起不來。
 
-## 已知踩雷
+## profiling 時的 layer 權重
 
-### FP8 KV cache + 非 trtllm DSA backend 會炸
+三種 layer 的數量比是 3 : 11 : 31（KDA + dense MLP / MLA/DSA + MoE / KDA + MoE），所以：
 
-GLM-5.3-Flash 是 hybrid，attention backend 被包在 `HybridLinearAttnBackend` 裡。
-FP8 KV 搭配非 trtllm 的 DSA backend 時，讀取會走
-`_get_mla_kv_buffer_from_fp8_for_dsa()`，它向 `get_attn_backend()` 要
-`.forward_metadata` —— 那個呼叫會 unwrap `TboAttnBackend` 但 **不會 unwrap hybrid wrapper**，
-於是 raise。
-
-觸發條件是「chunked-prefill 續傳 + prefix reuse」，所以 1024-token 的短 shape
-量測不會踩到（`results/GLM-5.3-Flash/CRASHED-fp8kv-untagged-docker/` 就是踩到的紀錄）。
-**ROCm 上請用 `--kv-cache-dtype bfloat16`。**
-
-### 其他
-
-- `--disable-shared-experts-fusion`：cookbook 的 GB300 recipe 有帶。ROCm 上的 shared expert
-  fusion 來自 #41161（FP8 ckpt）和 #41870（Quark MXFP4 ckpt），**兩個都已 merge、在 1012 image 裡**。
-  `shared_experts_fusion_disable_reason` 只在 AITER gfx950、TP4 / TP8、EP1、沒有 MoE a2a、
-  E=288 / topk 8 / hidden 4096 / moe_intermediate 2048、clamped SiLU（limit 10.0），而且 routed 與
-  shared expert 同一種量化 layout 時放行。啟動 log 會印 `Shared experts fusion optimization enabled.`，
-  aiter fused_moe 的 key 變成 `E=289, topk=9`；MI355X 不要加這個 flag。
-- 第一次呼叫時 fused k-pool 與 AITER mHC kernel 會走 JIT compile 路徑，
-  量 conc-1 之前一定要先做 warmup run。
-- `hc_*` 參數是 fp32 且列在 `quantization_config.modules_to_not_convert` 裡；
-  MTP block（`model.layers.45.*`）在 hybrid FP8+NVFP4 checkpoint 裡是列在
-  `quantization_config.ignore` 的 BF16 區塊，`_resolve_nextn_quant_config` 會處理，
-  不要手動給它塞 FP8 quant config（會 load 到沒有 scale 的 BF16 payload 而壞掉）。
-
-### `HSA_NO_SCRATCH_RECLAIM=1` + agentic conc 64 會機率性 crash
-
-conc 64（HBM 幾乎滿）時，RCCL 的 `ncclDevKernel_Generic_1` launch 會失敗，錯誤是
-`HSA_STATUS_ERROR_OUT_OF_RESOURCES`，通常在開跑後 55–71 分鐘。這是機率性的，
-不是 regression：`=1` 的 15 次完整 conc 64 run 裡 6 次 crash，而且 crash 跟 high-load
-decode batch 的數量沒有對應關係。
-`HSA_NO_SCRATCH_RECLAIM=0` 有 2 次完整 conc 64 run 都沒 crash，但 206 上那次 P90 interactivity
-只有 19.17（`=1` 的 prstack-fix 是 22.92），所以 recipe 維持 image 預設的 `=1`，
-conc 64 crash 時就重跑。crash 前剩餘 HBM 只有 0.28–1.5 GB（HSA 錯誤訊息裡的 Available Free mem）。
-
-## PR stack
-
-目前的 image、自己疊的 PR、aiter patch 與手動步驟都在 `pr-stack.md`（1012 image 那份移到它的歷史紀錄）。重跑 benchmark 前先讀它。
-
-## MI355X TP4 agentic 設定與實測（0928 image recipe）
-
-Recipe：`~/SGLang-benchmarks/Agentic/recipe_glm53flash_fp4_mi355x_sglang_mtp.sh`，
-image `rocm/sgl-dev:v0.5.20-rocm10-mi35x-20260928` + 當時的 PR stack（DSA 還是 TileLang），checkpoint
-`amd/GLM-5.3-Flash-Quark-MXFP4`，TP4 / EP1。
-
-```bash
-python3 -m sglang.launch_server \
-  --model-path amd/GLM-5.3-Flash-Quark-MXFP4 --trust-remote-code \
-  --tp 4 --ep-size 1 \
-  --kv-cache-dtype bfloat16 \
-  --dsa-prefill-backend tilelang --dsa-decode-backend tilelang \
-  --moe-runner-backend aiter \
-  --mamba-radix-cache-strategy extra_buffer \
-  --tool-call-parser glm47 --reasoning-parser glm45 \
-  --chunked-prefill-size 16384 --mem-fraction-static 0.85 \
-  --speculative-algorithm EAGLE --speculative-num-steps 5 \
-  --speculative-eagle-topk 1 --speculative-num-draft-tokens 6 \
-  --max-running-requests $MAX_RUNNING --cuda-graph-max-bs-decode $CUDA_GRAPH_MAX_BS \
-  --mamba-full-memory-ratio $MAMBA_RATIO
-  # conc 64 再加：
-  # --enable-hierarchical-cache --hicache-write-policy write_back --hicache-io-backend direct
-  # --hicache-mem-layout page_first_direct --hicache-size 169
-```
-
-| conc | max-running | cuda-graph max bs | mamba ratio | HiCache |
-|---|---|---|---|---|
-| 1–32 | max(2 × conc, 8) | = max-running | 0.9 | 無 |
-| 64 | 80 | 64 | 0.5 | 169 GB / rank |
-
-結果（`bench-Agentic-TP4_EP1-mtp5-prstack-fix`，`HSA_NO_SCRATCH_RECLAIM=1`；
-同設定重跑的差異大約 ±3%，conc 32 約 ±6%）：
-
-| conc | P90 interactivity (tok/s/user) | total throughput (input + output, tok/s/GPU) |
-|---|---|---|
-| 1 | 259.18 | 6021 |
-| 4 | 222.21 | 8894 |
-| 8 | 187.30 | 15095 |
-| 16 | 134.79 | 26902 |
-| 32 | 73.59 | 53569 |
-| 64 | 22.92 | 64432 |
-
-## MI355X TP4 實測（舊資料：v0.5.18-rocm720-mi35x，zai-org FP8 checkpoint）
-
-這節是早期 fixed-shape 量測，跟上面的 agentic 設定不同，只能當作參考。
-
-Docker `lmsysorg/sglang:v0.5.18-rocm720-mi35x`，commit `aa8c950a3d`（+ local k-pool
-routing revert），機器 `smci355-ccs-aus-m15-21`，FP8 權重 / BF16 KV，GSM8K accuracy **0.9712**。
-資料來源：`~/SGLang-benchmarks/results/GLM-5.3-Flash/lmsysorg_sglang-v0.5.18-rocm720-mi35x/bench-Fixed-TP4/all_benchmarks.csv`
-
-### in 1024 / out 1024
-
-| conc | tok/s/user | tok/s/GPU | TTFT (ms) | TPOT (ms) | ITL (ms) |
-|---|---|---|---|---|---|
-| 4 | 94.8 | 180 | 103 | 10.6 | 10.3 |
-| 8 | 84.1 | 326 | 104 | 11.9 | 11.4 |
-| 16 | 66.8 | 517 | 109 | 15.0 | 13.8 |
-| 32 | 56.0 | 857 | 111 | 17.9 | 15.6 |
-| 64 | 39.3 | 1221 | 138 | 25.5 | 21.2 |
-
-### in 8192 / out 1024
-
-| conc | tok/s/user | tok/s/GPU | TTFT (ms) | TPOT (ms) | ITL (ms) |
-|---|---|---|---|---|---|
-| 4 | 90.8 | 768 | 287 | 11.0 | 10.3 |
-| 8 | 77.5 | 1329 | 288 | 12.9 | 11.2 |
-| 16 | 60.2 | 2043 | 289 | 16.6 | 13.0 |
-| 32 | 45.0 | 3060 | 287 | 22.2 | 14.8 |
-| 64 | 29.3 | 4083 | 442 | 34.1 | 18.7 |
-
-### in 70000 / out 300
-
-| conc | tok/s/user | tok/s/GPU | TTFT (ms) | TPOT (ms) | ITL (ms) |
-|---|---|---|---|---|---|
-| 4 | 35.4 | 6039 | 2477 | 28.2 | 10.2 |
-| 8 | 18.1 | 6924 | 3022 | 55.2 | 11.2 |
-| 16 | 9.6 | 7536 | 4423 | 103.9 | 13.0 |
-| 32 | 4.8 | 7899 | 5640 | 208.9 | 14.7 |
-| 64 | 2.3 | 7916 | 8070 | 434.1 | 18.9 |
-
-值得注意的兩件事：
-
-- **ITL 幾乎不隨 input length 成長**（conc 4 時 10.3 / 10.3 / 10.2 ms）。
-  這正是 hybrid 架構的效果：34 層的 state 大小固定，只有 11 層的 KV 會隨 context 變長。
-- 70K input 的 tok/s/GPU 在 conc 16 之後就飽和在 ~7.9K，
-  瓶頸從 decode 轉到 prefill（TTFT 從 2.5 s 一路漲到 8 s）。
-
-## 對照 profiling 用的 layer 權重
-
-分析 trace 的 layer breakdown 時，記得三種 layer 的數量比是 **3 : 11 : 31**：
-
-| layer type | 數量 | 佔比 |
-|---|---|---|
-| KDA + dense MLP | 3 | 6.7% |
-| MLA/DSA + MoE | 11 | 24.4% |
-| KDA + MoE | 31 | 68.9% |
-
-所以：
-- **indexer 的總成本 = 單層 indexer × 11**
-- **MoE 的總成本 = 單層 MoE × 42**
-- **KDA 的總成本 = 單層 KDA × 34**
-- **mHC 的總成本 = 單層 4 次 × 45 = 180 次操作**（AITER gfx950 decode 每層 5 個 kernel，見 `mhc.md`）
+- indexer 的總成本 = 單層 × 11
+- MoE 的總成本 = 單層 × 42
+- KDA 的總成本 = 單層 × 34
+- mHC 的總成本 = 每層 4 次 × 45 = 180 次（AITER gfx950 decode 每層 5 個 kernel，見 `mhc.md`）

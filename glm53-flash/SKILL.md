@@ -120,7 +120,7 @@ MTP layer 不在 `kda_layers` 清單裡，所以它是 **MLA/DSA + MoE**。但�
 | `mhc.md` | mHC 的數學（`hc_pre` / `hc_post` / Sinkhorn）、參數命名、kernel dispatch、記憶體與通訊成本 |
 | `kda-linear-attention.md` | KDA 的 projection 清單、gated delta rule recurrence、state cache 大小、prefill/decode kernel |
 | `dsa-kpool-indexer.md` | k-pool indexer 的 pooling、tail 選取、top-k 展開、kernel 清單、和 GLM-5.2 indexer 對照 |
-| `serving-and-perf.md` | 啟動 flag、兩個 memory pool 的調參、MI355X TP4 實測數字、已知踩雷 |
+| `serving-and-perf.md` | 兩個 memory pool 的大小與切法（ratio vs 固定 slot 數、ReplaySSM 的影響）、目前設定在哪、已知踩雷 |
 | `pr-stack.md` | MI355X 目前的 image 與其中的 merged PR、自己疊的 PR 與啟用方式、monokernel 更新、手動步驟、重跑前檢查清單；舊 image 的 stack 留作歷史 |
 
 ## 常見誤判（讀 trace / debug 前先確認）
@@ -128,7 +128,7 @@ MTP layer 不在 `kda_layers` 清單裡，所以它是 **MLA/DSA + MoE**。但�
 - **看不到 RoPE kernel 不是 bug。** text tower 是 NoPE。看到 RoPE 只可能來自 vision encoder。
 - **`index_topk=2048` 不等於 attend 2048 個 token。** k-pool 選 512 個 pool 展開成 2048 個 history token，再無條件補上 `seq_len % 4` 個 tail token，輸出 buffer 寬度是 **2051**。
 - **11 層才有 indexer。** indexer 成本要除以 11（不是 45）。checkpoint 的 `indexer_types` 45 個全是 `"full"`，`dsa_layer_skips_topk` 最先看這個欄位，所以 11 層各自跑完整 indexer，沒有 GLM-5.2 那種跨層共用。MTP layer 例外，它是 `skip_topk=True`。
-- **KDA 層沒有 KV cache。** 它用固定大小的 conv state + recurrent state，存在 `MambaPool` 而不是 KV pool。哪個 pool 先滿要看 context 長度和 `--mamba-full-memory-ratio`：短 context、高 concurrency 時常是 KDA state pool 先滿；長 context 的 agentic workload（ISL ~100K、`mamba-full-memory-ratio 0.5`）則是 KV pool 先滿，conc 64 時 `full token usage` 到 1.00、`mamba usage` 最高只有 ~0.38。
+- **KDA 層沒有 KV cache。** 它用固定大小的 conv state + recurrent state，存在 `MambaPool` 而不是 KV pool。哪個 pool 先滿要看 context 長度和 `--mamba-full-memory-ratio`：短 context、高 concurrency 時常是 KDA state pool 先滿；長 context 的 agentic workload（ISL ~100K、`mamba-full-memory-ratio 0.5`）則是 KV pool 先滿，conc 64 時 `full token usage` 到 1.00。log 的 `mamba usage` 只算 running request 占住的 slot（每個 4 個），不含 radix cache 裡可 evict 的 prefix state，所以它低不代表 slot 給太多，見 `serving-and-perf.md`。
 - **residual 是 4 倍寬。** 45 層 text layer 之間的 hidden state 是 `[tokens, 4*hidden]`；最後一層之後才 `hc_contract` 平均回 `[tokens, hidden]`。MTP draft layer 沒有 mHC，吃的是 `[tokens, hidden]`。
 - **MoE 在 trace 裡是 289 個 expert、topk 9。** gfx950 TP4 上 shared expert 被併進 routed MoE（#41161 / #41870，已在 image），log 會印 `Shared experts fusion optimization enabled.`，aiter 的 key 是 `E=289, topk=9`。不要去找獨立的 shared expert GEMM。
 - **`gate_lower_bound=-5.0` 會關掉 KDA 的 packed decode。** `KDAAttnBackend.forward_decode` 只在 `layer.lower_bound is None` 或 decode kernel 有 `supports_packed_decode_safe_gate` 時走 `packed_decode`；後者只有 CUDA 的 Helion kernel，ROCm 的 `TritonKDAKernel` 沒有，所以 GLM-5.3 在 MI355X 上一律走 `fused_sigmoid_gating_delta_rule_update`。layer 讀的是 `linear_attn_config["gate_lower_bound"]`；頂層的 `linear_lower_bound` 只在 config 沒有 `linear_attn_config` 時才當 fallback，而兩份 checkpoint 都有 `linear_attn_config`，所以 override `linear_lower_bound` 沒有任何作用。不要為了效能去改 `gate_lower_bound`，那會改變數值。
