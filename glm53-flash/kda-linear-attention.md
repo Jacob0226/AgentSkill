@@ -268,6 +268,77 @@ KDA 的 state 要透過 `req_to_token_pool.mamba2_layer_cache(layer_id)` 取。
 反過來，長 context 的 agentic workload（ISL ~100K、ratio 0.5）是 KV pool 先滿：
 conc 64 時 `full token usage` 到 1.00，`mamba usage` 最高只有 ~0.38。
 
+## TP4 decode / verify 詳細資料流
+
+以下 `B` 是 request 數，`D` 是每個 request 的 verify rows，`T = B × D`。
+一般 decode 是 `D=1`，所以 `T=B`；MTP verify 的 committed state 仍是
+`[B,16,128,128]`，只有邏輯上的逐-token intermediate state 可 view 成
+`[B,D,16,128,128] ≅ [T,16,128,128]`。ReplaySSM verify 不會把這整塊寫回主 cache。
+
+```mermaid
+flowchart TD
+    R0["mHC residual<br/>R [T,4,4096]"] --> PRE["mHC attention pre<br/>pre [T,4], comb [T,4,4]<br/>mix + RMSNorm"]
+    PRE --> X["layer input x [T,4096]"]
+
+    X --> IN["fused_qkvbfg_a_proj<br/>[T,4096] x [4096,6416]"]
+    IN --> Q["q [T,16,128]"]
+    IN --> K["k [T,16,128]"]
+    IN --> V["v [T,16,128]"]
+    IN --> BE["beta logits [T,16]"]
+    IN --> FA["f_a [T,128]"]
+    IN --> GA["g_a [T,128]"]
+
+    FA --> FB["batched f_b GEMM<br/>[T,128] x [128,2048]"]
+    GA --> GB["batched g_b GEMM<br/>[T,128] x [128,2048]"]
+    FB --> AL["forget logits a [T,16,128]"]
+    GB --> NG["o_norm gate [T,16,128]"]
+
+    Q --> CONV["depthwise causal conv1d, kernel 4<br/>current + previous 3 positions, then SiLU"]
+    K --> CONV
+    V --> CONV
+    CONV --> MQ["mixed q [T,16,128]"]
+    CONV --> MK["mixed k [T,16,128]"]
+    CONV --> MV["mixed v [T,16,128]"]
+
+    AL --> DEC["g = -5 sigmoid(exp(A_log) (a + dt_bias))<br/>decay = exp(g), [T,16,128]"]
+    BE --> LR["learning rate sigmoid(beta) [T,16]"]
+    S0["committed S [B,16,128,128]"] --> FORGET["forget old memory<br/>S = decay * S"]
+    DEC --> FORGET
+
+    FORGET --> PRED["predict current association<br/>predicted_v = S @ k, [128]"]
+    MK --> PRED
+    PRED --> ERR["error = v - predicted_v, [128]"]
+    MV --> ERR
+    ERR --> VD["v_delta = sigmoid(beta) * error"]
+    LR --> VD
+    VD --> WRITE["write only the missing information<br/>S = S + outer(v_delta,k), [128,128]"]
+    MK --> WRITE
+    WRITE --> ST["updated/transient state<br/>decode: committed in place<br/>verify: register / scratch / ReplaySSM ring"]
+
+    WRITE --> READ["retrieve with query<br/>o = S @ q, [T,16,128]"]
+    MQ --> READ
+    READ --> ON["per-head gated RMSNorm<br/>gate = sigmoid(g_b), [T,16,128]"]
+    NG --> ON
+    ON --> FLAT["flatten local heads<br/>[T,16,128] -> [T,2048]"]
+    FLAT --> OP["row-parallel o_proj<br/>[T,2048] x [2048,4096]<br/>partial [T,4096]"]
+    OP --> AR["TP4 all-reduce SUM<br/>complete [T,4096]"]
+
+    AR --> POST["mHC post for stream j<br/>new_j = h_post_j * attention<br/>+ sum_k comb_kj * old_k"]
+    R0 --> POST
+    POST --> R1["updated residual<br/>[T,4,4096] = [T,16384]"]
+```
+
+投影實際分成兩個有資料相依的 GEMM。第一個產生 `f_a/g_a`，第二個才可展開 gate：
+
+```
+fg_a    [2,T,128]
+W_fg_b  [2,128,2048]
+output  [2,T,2048]
+```
+
+這是 batched matmul：batch 0 算 `f_a @ W_f_b`，batch 1 算 `g_a @ W_g_b`；
+不是把兩組 row 串成 `[2T,128]` 後乘同一份 weight。
+
 ## 資料流總結
 
 ```
