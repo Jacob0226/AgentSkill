@@ -145,6 +145,37 @@ end-to-end item:
 Use `E2E: bench_serving` (or the benchmark's name) for fixed-length runs. With only one perf
 level, drop its sub-bullet and put the table straight under Perf.
 
+## Long-context accuracy: run the needle, not only GSM8K
+
+**Required before opening or updating any PR that can change model output** (attention, DSA indexer, k-pool, KV cache, MoE, quant, fused kernels, env defaults) on a long-context model such as GLM-5.x, GLM-5.3-Flash or DeepSeek-V3.2. Do not skip it because GSM8K passed.
+
+GSM8K cannot see a broken sparse indexer. `index_topk=2048` is a token budget (with `index_kpool=4`, 512 pooled groups expanded back to 2048 tokens), so under about 2K tokens of context every token is selected and a wrong indexer score changes nothing. AgentX and other golden-AL runs force the accept length, so they cannot show accuracy either. The 11/12 double-Hadamard bug (#44417 + #44661) scored 97% on GSM8K and 0/20 on the 125K needle.
+
+Launch the server with the exact args and envs of the build under test, then:
+
+```bash
+python3 ~/SGLang-benchmarks/tools/glm53_dcp_radix_needle.py <port> 3000 20    # about 32K tokens
+python3 ~/SGLang-benchmarks/tools/glm53_dcp_radix_needle.py <port> 12000 20   # about 125K tokens
+```
+
+| Rule | Detail |
+| --- | --- |
+| Pass bar | 20/20 at both lengths. A known-good build scores 20/20; anything lower is a bug until shown otherwise |
+| Compare | Run the baseline build with the same args when the PR result is below 20/20 |
+| Context | `--context-length` must fit 130K tokens |
+| A/B helper | `tools/needle_idxfix_1112.sh <gpus> <port> <out> <n_pairs> 20 <tree ...>` runs several sglang trees in a row |
+| Report | One row per length in the Accuracy table, next to GSM8K |
+
+```markdown
+* Accuracy
+
+  | Check | baseline | this PR |
+  | --- | --- | --- |
+  | GSM8K (1319, thinking) | 97.12% | 97.04% |
+  | Needle, 32K tokens | 20/20 | 20/20 |
+  | Needle, 125K tokens | 20/20 | 20/20 |
+```
+
 ## Rules
 
 - **Never hard-wrap the body.** One line per paragraph, however long. GitHub soft-wraps to the
@@ -164,6 +195,7 @@ level, drop its sub-bullet and put the table straight under Perf.
   492.08 mean against 389.20 median TTFT, so an unlabelled column is unreproducible.
 - Always include accuracy, with the caveat: "GSM8K 0.933 → 0.927, single scoring pass each —
   within what one pass resolves." A small accuracy move that goes unmentioned reads as hidden.
+  On long-context models, accuracy means GSM8K **and** the 32K / 125K needle (see above).
 - Explain a trend when the table shows one — e.g. a per-forward saving grows with concurrency
   because deeper queues wait behind more forwards. One sentence, inside the word budget.
 - If the change fixes a regression, link the PR that introduced it.
