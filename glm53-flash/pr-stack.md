@@ -13,7 +13,8 @@ MI355X 的數字來自四層：**image、自己疊的 sglang PR stack、monokern
 | image 內 aiter | `285579b62`，**跟 1026 image 一樣，沒有更新** |
 | image 內 sgl-amd-mono | `/sgl-workspace/sgl-amd-mono`，editable install，`e52803f`（11/04） |
 | 其他 | FlyDSL 0.4.0、torch 2.11.0+rocm10.0.0、triton 3.8.0；image 預設 `HSA_NO_SCRATCH_RECLAIM=1`、`SGLANG_USE_AITER=1` |
-| sglang stack | `~/PR/wt-glm53-1106-prstack`，branch `glm53-prstack-c06e39c6ca`，HEAD `09111fe9a3`：`c06e39c6ca` 上 10 個 commit（一個 PR 一個，全部是 11/07 的最新 head），見「1106 stack 的解衝突紀錄」。**這棵 tree 還帶著 #44661 的 code**，用它時絕對不要設 `SGLANG_DSA_FUSE_HADAMARD_QUANT`；下次重建就不會有 |
+| sglang stack | `~/PR/wt-glm53-1117-prstack`，branch `glm53-prstack-c06e39c6ca-no44661`，HEAD `6fd8d4b50a`：`c06e39c6ca` 上 9 個 commit（一個 PR 一個，全部是 11/07 的最新 head，**不含 #44661**），見「1106 stack 的解衝突紀錄」。11/17 從舊 stack 把 #44661 的 commit 拿掉、後面的 #48875 和 #48806 直接接上（沒有衝突），跟舊 stack 只差 #44661 的 5 個檔案。內容跟 `glm53-prstack1106-no44661` `309b924c75`（`~/PR/wt-glm53-1117-base-no44661`，舊 stack 加一個 revert commit）完全一樣 |
+| 舊 stack（不要再用） | `~/PR/wt-glm53-1106-prstack`，HEAD `09111fe9a3`：含 #44661 的 10 個 commit。11/17 以前的結果都在這上面；env 沒開時 #44661 的 code 不會跑，結果跟新 stack 一樣，開了就有 double Hadamard bug |
 | mono | `/shared_nfs/jacchang/exp/sgl-amd-mono-main1107`（upstream main `25723f1`），見「Monokernel」 |
 | 驗證 | `/shared_nfs/jacchang/prstack_1107/`（node 150）：BF16 KV、Triton DSA、BCG、MoE CSV、兩個 env、MTP5。GPU 0–3 用 `run_gsm.sh`（HiCache 216 GB，不開 monokernel）；GPU 4–7 用 `run_gsm_mono.sh`（不開 HiCache，開 monokernel） |
 
