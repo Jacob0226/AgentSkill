@@ -145,26 +145,32 @@ end-to-end item:
 Use `E2E: bench_serving` (or the benchmark's name) for fixed-length runs. With only one perf
 level, drop its sub-bullet and put the table straight under Perf.
 
-## Long-context accuracy: run the needle, not only GSM8K
+## Long-context accuracy: run RULER, not only GSM8K
 
 **Required before opening or updating any PR that can change model output** (attention, DSA indexer, k-pool, KV cache, MoE, quant, fused kernels, env defaults) on a long-context model such as GLM-5.x, GLM-5.3-Flash or DeepSeek-V3.2. Do not skip it because GSM8K passed.
 
-GSM8K cannot see a broken sparse indexer. `index_topk=2048` is a token budget (with `index_kpool=4`, 512 pooled groups expanded back to 2048 tokens), so under about 2K tokens of context every token is selected and a wrong indexer score changes nothing. AgentX and other golden-AL runs force the accept length, so they cannot show accuracy either. The 11/12 double-Hadamard bug (#44417 + #44661) scored 97% on GSM8K and 0/20 on the 125K needle.
+GSM8K cannot see a broken sparse indexer. `index_topk=2048` is a token budget (with `index_kpool=4`, 512 pooled groups expanded back to 2048 tokens), so under about 2K tokens of context every token is selected and a wrong indexer score changes nothing. AgentX and other golden-AL runs force the accept length, so they cannot show accuracy either. The double-Hadamard bug (#44417 + #44661) scored 97% on GSM8K, but RULER NIAH at 128K was almost all 0 (11/17); without it the same build scores 100.
 
-Launch the server with the exact args and envs of the build under test, then:
+Use [NVIDIA RULER](https://github.com/NVIDIA/RULER) (13 synthetic tasks: 8 NIAH, vt, cwe, fwe, qa_1 SQuAD, qa_2 HotpotQA) at 32K and 128K. RULER makes the data and scores it; only the client is ours. The private needle script (`glm53_dcp_radix_needle.py`) is a sanity check only; never put it in a PR, reviewers do not know it.
 
 ```bash
-python3 ~/SGLang-benchmarks/tools/glm53_dcp_radix_needle.py <port> 3000 20    # about 32K tokens
-python3 ~/SGLang-benchmarks/tools/glm53_dcp_radix_needle.py <port> 12000 20   # about 125K tokens
+# one-time data, inside a container with network (13 tasks x N samples x 32768 and 131072)
+bash ~/SGLang-benchmarks/tools/ruler_prep_1117.sh 20 /shared_nfs/jacchang/ruler1117/n20
+# one lane per build: launch, send, score; run baseline and this PR at the same time on GPUs 0-3 / 4-7
+bash ~/SGLang-benchmarks/tools/ruler_ab_1117.sh 0,1,2,3 30100 <out>/base <baseline tree> /shared_nfs/jacchang/ruler1117/n20
+bash ~/SGLang-benchmarks/tools/ruler_ab_1117.sh 4,5,6,7 30200 <out>/pr <PR tree> /shared_nfs/jacchang/ruler1117/n20
 ```
 
 | Rule | Detail |
 | --- | --- |
-| Pass bar | 20/20 at both lengths. A known-good build scores 20/20; anything lower is a bug until shown otherwise |
-| Compare | Run the baseline build with the same args when the PR result is below 20/20 |
-| Context | `--context-length` must fit 130K tokens |
-| A/B helper | `tools/needle_idxfix_1112.sh <gpus> <port> <out> <n_pairs> 20 <tree ...>` runs several sglang trees in a row |
-| Report | One row per length in the Accuracy table, next to GSM8K |
+| Pass bar | NIAH tasks 95–100 at both lengths. A known-good GLM-5.3-Flash build (TP4, fp32 state, ReplaySSM, MTP 6, 20 per task) averages 95.1 at 32K and 94.0 at 128K. NIAH far below 100 is a bug until shown otherwise |
+| Compare | Always run the baseline build in the same session with the same args |
+| Server args | `ruler_ab_1117.sh` holds the GLM-5.3-Flash args; copy it and change the args to match the build under test. Never set `SGLANG_DSA_FUSE_HADAMARD_QUANT` |
+| Prompt | GLM-5.3-Flash's chat template has no `enable_thinking`. `ruler_pred_1117.py` sends `/generate` with the chat template, then `</think>` and RULER's `answer_prefix` (RULER's own chat-model format), greedy, `tokens_to_generate` from RULER |
+| Scoring | RULER's `eval/evaluate.py`, with `PYTHONPATH=/shared_nfs/jacchang/ruler1117/shim` (stands in for NeMo's `read_manifest`) |
+| Fresh clone | `scripts/data/synthetic/json/english_words.json` is a git LFS pointer; fetch it from `media.githubusercontent.com` or `cwe` gets 0 samples |
+| Time | 20 per task: about 17 min per lane (server 2 min, 32K 160 s, 128K 640 s); 50 per task about 40 min; 100 about 75 min |
+| Report | One row per length (13-task average) in the Accuracy table, next to GSM8K |
 
 ```markdown
 * Accuracy
@@ -172,8 +178,8 @@ python3 ~/SGLang-benchmarks/tools/glm53_dcp_radix_needle.py <port> 12000 20   # 
   | Check | baseline | this PR |
   | --- | --- | --- |
   | GSM8K (1319, thinking) | 97.12% | 97.04% |
-  | Needle, 32K tokens | 20/20 | 20/20 |
-  | Needle, 125K tokens | 20/20 | 20/20 |
+  | RULER 32K, 13 tasks × 20, average | 95.1 | 95.4 |
+  | RULER 128K, 13 tasks × 20, average | 94.0 | 93.3 |
 ```
 
 ## Rules
@@ -195,7 +201,7 @@ python3 ~/SGLang-benchmarks/tools/glm53_dcp_radix_needle.py <port> 12000 20   # 
   492.08 mean against 389.20 median TTFT, so an unlabelled column is unreproducible.
 - Always include accuracy, with the caveat: "GSM8K 0.933 → 0.927, single scoring pass each —
   within what one pass resolves." A small accuracy move that goes unmentioned reads as hidden.
-  On long-context models, accuracy means GSM8K **and** the 32K / 125K needle (see above).
+  On long-context models, accuracy means GSM8K **and** RULER at 32K / 128K (see above).
 - Explain a trend when the table shows one — e.g. a per-forward saving grows with concurrency
   because deeper queues wait behind more forwards. One sentence, inside the word budget.
 - If the change fixes a regression, link the PR that introduced it.
