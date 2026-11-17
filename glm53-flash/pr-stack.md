@@ -1,6 +1,6 @@
 # PR stack（MI355X 重跑 benchmark 前必讀）
 
-最後更新：2026-11-07（台灣時間）。「狀態」與「能不能套」是當天查的，重跑前先照最後的「重跑前檢查」更新一次。
+最後更新：2026-11-07（台灣時間）；11/17 把 #44661 從 stack 拿掉（見「從 stack 拿掉的」）。「狀態」與「能不能套」是當天查的，重跑前先照最後的「重跑前檢查」更新一次。
 
 MI355X 的數字來自四層：**image、自己疊的 sglang PR stack、monokernel（sgl-amd-mono）版本、手動步驟（env、CSV、server flag）**。漏掉任何一層，結果就跟之前的報告對不上。**把 PR 套進 tree 不等於它會生效**：很多 PR 要 env、server flag 或特定條件才會跑到，見「每個 PR 怎麼啟用」。B200 用 stock image，沒有 PR stack。
 
@@ -13,7 +13,7 @@ MI355X 的數字來自四層：**image、自己疊的 sglang PR stack、monokern
 | image 內 aiter | `285579b62`，**跟 1026 image 一樣，沒有更新** |
 | image 內 sgl-amd-mono | `/sgl-workspace/sgl-amd-mono`，editable install，`e52803f`（11/04） |
 | 其他 | FlyDSL 0.4.0、torch 2.11.0+rocm10.0.0、triton 3.8.0；image 預設 `HSA_NO_SCRATCH_RECLAIM=1`、`SGLANG_USE_AITER=1` |
-| sglang stack | `~/PR/wt-glm53-1106-prstack`，branch `glm53-prstack-c06e39c6ca`，HEAD `09111fe9a3`：`c06e39c6ca` 上 10 個 commit（一個 PR 一個，全部是 11/07 的最新 head），見「1106 stack 的解衝突紀錄」 |
+| sglang stack | `~/PR/wt-glm53-1106-prstack`，branch `glm53-prstack-c06e39c6ca`，HEAD `09111fe9a3`：`c06e39c6ca` 上 10 個 commit（一個 PR 一個，全部是 11/07 的最新 head），見「1106 stack 的解衝突紀錄」。**這棵 tree 還帶著 #44661 的 code**，用它時絕對不要設 `SGLANG_DSA_FUSE_HADAMARD_QUANT`；下次重建就不會有 |
 | mono | `/shared_nfs/jacchang/exp/sgl-amd-mono-main1107`（upstream main `25723f1`），見「Monokernel」 |
 | 驗證 | `/shared_nfs/jacchang/prstack_1107/`（node 150）：BF16 KV、Triton DSA、BCG、MoE CSV、兩個 env、MTP5。GPU 0–3 用 `run_gsm.sh`（HiCache 216 GB，不開 monokernel）；GPU 4–7 用 `run_gsm_mono.sh`（不開 HiCache，開 monokernel） |
 
@@ -64,11 +64,11 @@ FP8 KV 的 device KV 是 23,792,128 tokens，BF16 是 12,267,264（同樣 132.84
 | sglang #48875 | BCG replay + graph 內 HIP KDA extend（P90 +9%） | **server flag**：`--cuda-graph-backend-prefill breakable`，建議加 `--cuda-graph-max-bs-prefill 2560`（recipe 已設） | 99,840 prefix + 16 new tokens 的 prefill 約 37 ms（沒 replay 約 99 ms） |
 | sglang #38764 | KDA projection PTPC FP8（TTFT −2.2%） | **env**：`SGLANG_OPT_GLM53_KDA_PTPC_MODULES=qkv_proj,f_a_proj,g_a_proj,o_proj`（預設空，沒設等於沒開） | KDA projection 在 trace 裡是 FP8 GEMM |
 | sglang #44659 | row-streaming KDA packed decode（ITL −0.53%） | 自動：gfx950。**只在 `forward_decode`（每個 request 1 token）**；MTP 時 target 走 verify，依程式判斷 MTP benchmark 跑不到它 | 不開 MTP 的 decode trace 有 `kda_packed_decode_rowstream_kernel` |
-| sglang #44661 | KPool Hadamard + FP8 quant 融合（ITL −0.43%） | **env**：`SGLANG_DSA_FUSE_HADAMARD_QUANT=1`（預設 False）；另需 gfx950、indexer head_dim = block_size 且為 2 的次方 | trace 少了獨立的 Hadamard kernel |
-### 從 stack 拿掉的（11/07 使用者決定）
+### 從 stack 拿掉的（使用者決定）
 
 | 項目 | 原本的作用 | 拿掉的影響 |
 |---|---|---|
+| sglang #44661（Raiden-Makoto，11/17 拿掉） | KPool Hadamard + FP8 quant 融合（ITL −0.43%），env `SGLANG_DSA_FUSE_HADAMARD_QUANT=1` | **跟 #44417 疊在一起會讓 MTP verify 的 indexer query 轉兩次 Hadamard**（#44417 的 `_get_q_k_fused_x_proj` 一律 rotate，#44661 的 `fused_hadamard_act_quant` 再轉一次），indexer 分數變成 q·Hk。GSM8K 看不出來，長 context 全錯：11/12 needle 125K 0/20；11/17 RULER 128K 的 NIAH 幾乎全 0。**不要再疊，也不要設這個 env** |
 | sglang #42020（stale bot 10/25 關閉） | FFN all-reduce + `hc_post` 融合，env `SGLANG_ROCM_FUSED_AR_MHC_POST=1` | 這個 env 在新 stack 沒有作用，不用再設 |
 | `f0a7a579d5`（內部 commit，沒有 PR） | 讓 #41615 的 Triton sparse MLA 接受 FP8 e4m3 KV | 被 #48806 取代，不要再疊 |
 
@@ -85,15 +85,15 @@ FP8 KV 的 device KV 是 23,792,128 tokens，BF16 是 12,267,264（同樣 132.84
 | #38764 | `fused_norm_gate.py` import（upstream #47782 改用 `current_arch`）、`environ.py` 相鄰新增 | import 用 upstream 的再加 PR 的 `fp8_dtype_to_triton`；env 兩個都留 |
 | #44416 | `smallm_router_gfx950/__init__.py`：PR 已 merge 過 #48399（拿掉 `SGLANG_ROCM_SMALLM_ROUTER`、改用 `current_arch`），image 還有這個 env | 用 PR 的版本，補 `from sglang.kernels.arch import current_arch`，`smallm_router_supported` 保留 `envs.SGLANG_ROCM_SMALLM_ROUTER.get()` |
 | #44417 | `dsa_metadata_manager.py`：同樣是 #48399 拿掉 `SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION`，image 還有（預設 True） | `requested and supported and (is_cuda() or _is_hip)`，跟 1026 stack 一樣 |
-| #44661 | `dsa_indexer_kpool.py`：import、新 method 相鄰、`_project_and_scale_head_gates` 被 #44417 改名 | import 用 #44417 後的；兩邊的新 method 都留；呼叫改 `_project_head_gates` |
-| #44661 | **語意衝突，git 不會標**：#44417 把 `n_heads**-0.5` 從 `_project_head_gates` 移到 `_apply_q_scale_and_softmax_scale`，但 #44661 的 `fused_hadamard_act_quant(weights=head_weights, softmax_scale=...)` 假設 `head_weights` 已經乘過 | `_quant_query` 傳 `softmax_scale=self.softmax_scale * self.n_heads**-0.5`；漏了會讓 `SGLANG_DSA_FUSE_HADAMARD_QUANT=1` 時 indexer 分數差一個常數倍 |
+| #44661（已拿掉，只留紀錄） | `dsa_indexer_kpool.py`：import、新 method 相鄰、`_project_and_scale_head_gates` 被 #44417 改名 | import 用 #44417 後的；兩邊的新 method 都留；呼叫改 `_project_head_gates` |
+| #44661（已拿掉，只留紀錄） | **語意衝突，git 不會標**：#44417 把 `n_heads**-0.5` 從 `_project_head_gates` 移到 `_apply_q_scale_and_softmax_scale`，但 #44661 的 `fused_hadamard_act_quant(weights=head_weights, softmax_scale=...)` 假設 `head_weights` 已經乘過。這裡也漏了 `_get_q_k_fused_x_proj` 的 rotate，就是 double Hadamard bug | `_quant_query` 傳 `softmax_scale=self.softmax_scale * self.n_heads**-0.5`；漏了會讓 `SGLANG_DSA_FUSE_HADAMARD_QUANT=1` 時 indexer 分數差一個常數倍 |
 
 拿 11/07 main `b750923a2a` 當 base 時，#44416、#44417 可以直接套，但 #44659 會在 `kda_triton.py` 衝突，其他幾個照樣衝突。
 
 ## 建 stack
 
 ```bash
-# 預設依序疊：41615 41871 38764 44416 44417 46808 44659 44661 48875 48806:0ef818ced9,3d10677084
+# 預設依序疊：41615 41871 38764 44416 44417 46808 44659 48875 48806:0ef818ced9,3d10677084（不含 #44661）
 ~/SGLang-benchmarks/tools/build_glm53_prstack.sh <image sglang commit> <worktree> [entry...]
 ```
 
@@ -144,7 +144,7 @@ monokernel 只在下面條件都成立時接手，否則 server log 會印 `mono
 | env | PR | 值 |
 |---|---|---|
 | `SGLANG_OPT_GLM53_KDA_PTPC_MODULES` | #38764 | `qkv_proj,f_a_proj,g_a_proj,o_proj` |
-| `SGLANG_DSA_FUSE_HADAMARD_QUANT` | #44661 | `1` |
+| `SGLANG_DSA_FUSE_HADAMARD_QUANT` | #44661（已拿掉） | **不要設**（見「從 stack 拿掉的」） |
 | `AITER_CONFIG_FMOE` | MoE CSV | 見上 |
 | `HSA_NO_SCRATCH_RECLAIM` | — | 維持 image 預設 `1`，不要改 |
 
@@ -160,7 +160,7 @@ B200 用 stock image，不疊 PR。60 分鐘的對照點是 `lmsysorg/sglang:v0.
 
    ```bash
    GH="env -u GH_TOKEN -u GITHUB_TOKEN /home/jacchang/bin/gh"
-   for p in 41615 41871 38764 44415 44416 44417 46808 48875 44659 44661 48806; do
+   for p in 41615 41871 38764 44415 44416 44417 46808 48875 44659 48806; do
      $GH pr view $p --repo sgl-project/sglang --json number,state,headRefOid \
        --jq '"#\(.number) \(.state) \(.headRefOid[0:10])"'
    done
