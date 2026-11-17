@@ -164,7 +164,8 @@ bash ~/SGLang-benchmarks/tools/ruler_ab_1117.sh 4,5,6,7 30200 <out>/pr <PR tree>
 | Rule | Detail |
 | --- | --- |
 | Pass bar | NIAH tasks 95–100 at both lengths. A known-good GLM-5.3-Flash build (TP4, fp32 state, ReplaySSM, MTP 6, 20 per task) averages 95.1 at 32K and 94.0 at 128K. NIAH far below 100 is a bug until shown otherwise |
-| Compare | Always run the baseline build in the same session with the same args |
+| Compare | Always run the baseline build in the same session with the same args, at once on GPUs 0–3 and 4–7. Accuracy does not depend on the GPU set, so there is no swapped round (that is for perf) |
+| Past 262,144 tokens | When the change touches a path that runs only past 262,144 tokens (the DSA score-tile loop that faulted in sgl-amd-mono#97, a kpool or ring wrap, a context-length limit), also run sgl-eval RULER2 at 300K and 640K as `sgl-amd-mono-pr` says: the four NIAH tasks × 20 at both lengths, plus `mv_niah_hard` × 100 at 300K. 32K and 128K never reach that path |
 | Server args | `ruler_ab_1117.sh` holds the GLM-5.3-Flash args; copy it and change the args to match the build under test. Never set `SGLANG_DSA_FUSE_HADAMARD_QUANT` |
 | Prompt | GLM-5.3-Flash's chat template has no `enable_thinking`. `ruler_pred_1117.py` sends `/generate` with the chat template, then `</think>` and RULER's `answer_prefix` (RULER's own chat-model format), greedy, `tokens_to_generate` from RULER |
 | Scoring | RULER's `eval/evaluate.py`, with `PYTHONPATH=/shared_nfs/jacchang/ruler1117/shim` (stands in for NeMo's `read_manifest`) |
@@ -201,7 +202,8 @@ bash ~/SGLang-benchmarks/tools/ruler_ab_1117.sh 4,5,6,7 30200 <out>/pr <PR tree>
   492.08 mean against 389.20 median TTFT, so an unlabelled column is unreproducible.
 - Always include accuracy, with the caveat: "GSM8K 0.933 → 0.927, single scoring pass each —
   within what one pass resolves." A small accuracy move that goes unmentioned reads as hidden.
-  On long-context models, accuracy means GSM8K **and** RULER at 32K / 128K (see above).
+  On long-context models, accuracy means GSM8K **and** RULER at 32K / 128K (see above), plus
+  RULER2 at 300K / 640K when the change touches a path past 262,144 tokens.
 - Explain a trend when the table shows one — e.g. a per-forward saving grows with concurrency
   because deeper queues wait behind more forwards. One sentence, inside the word budget.
 - If the change fixes a regression, link the PR that introduced it.
