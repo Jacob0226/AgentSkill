@@ -83,6 +83,7 @@ The template asks for results **with the monokernels on and off, on the same ser
 | Layer check against SGLang's forward | `SGLANG_AMD_MONO_CHECK=1`: checks, violations, worst cosine |
 | End to end | `test/e2e/test_<model>_server.py` cases passed |
 | Task accuracy | GSM8K (or the model's eval) on vs off, same flags, with spec accept length if MTP |
+| Long-context accuracy | RULER2 NIAH at 300K and 640K on vs off (below). Required next to GSM8K, never instead of it |
 
 State a small accuracy move instead of hiding it: "0.912 on vs 0.907 off, one scoring pass each".
 
@@ -90,7 +91,16 @@ An accuracy run or e2e test counts only for the steps that reach the kernel. Row
 
 Accept length is evidence only with real acceptance. AgentX's golden accept length (`SGLANG_SIMULATE_ACC_LEN`, `SGLANG_SIMULATE_ACC_METHOD=match-expected`) fixes it regardless of the verify, so it says nothing about correctness.
 
-For DSA models, GSM8K prompts are shorter than the index top-k, so every key is selected and the sparse selection is not tested. A change to DSA, or a new width whose launch is close to but not bitwise equal to its reference, also needs a long-context check with real acceptance at the new widths, e.g. RULER NIAH at 300K and 640K (#98).
+**Long context: GSM8K plus RULER at 300K and 640K.** A PR that changes kernel or forward code of a long-context model (glm53_flash, glm53, deepseek_v41) gives RULER2 NIAH at 300K and 640K with real acceptance, next to GSM8K. GSM8K prompts are shorter than the DSA index top-k, so every key is selected and the sparse selection is not tested; some paths run only past 262,144 tokens (#97's score-tile loop: RULER at 300K 0.673 on `main`, 1.000 with the fix), and AgentX contexts pass that length (#71: 178 of 312 requests at concurrency 1). Run it as #98 did:
+
+| Item | Setup |
+| --- | --- |
+| Main table | sgl-eval `ruler2`, `--ruler2-seq-len` 300000 and 640000, `--ruler2-tasks mk_niah_basic mk_niah_hard mv_niah_basic mv_niah_hard --ruler2-dataset-size 20`, thinking on (`--chat-template-kwarg enable_thinking=true`), `--max-tokens 8192`, `--num-threads 4`. Report each task and the mean per length. |
+| `mv_niah_hard` at 300K, 100 samples | `--ruler2-dataset-size 100 --ruler2-tasks mv_niah_hard`. 20 samples do not resolve this task: #98's off moved 64.72 → 50.00 between two identical runs. Report both scores, the samples each side scores higher, and on − off with a bootstrap 95% CI over the samples. |
+| Samples, not seeds | `--seed` changes only the sampling seed; the dataset is fixed, so every seed asks the same 20 questions. More seeds average sampling noise on those 20 and do not replace 100 samples. |
+| Sides | Off and on at once, on GPUs 0–3 and 4–7, the same server flags (`--max-running-requests 8 --cuda-graph-max-bs-decode 8`, 4 requests at a time, so every step up to the largest width runs the kernel). Accuracy does not depend on the GPU set, so there is no swapped round. Repeat the 100-sample run only to size the noise when on and off differ by about that much. |
+| Datasets | sgl-eval generates each length's dataset into `~/.cache/sgl_eval/ruler2`. Two servers generating one dataset at once corrupt it (`FileNotFoundError` in a `.partial` directory): give each side its own `HOME`. |
+| Time (GLM-5.3-Flash, TP4, MI355X) | 20 samples: about 3 min at 300K, 8 min at 640K; the four tasks at 640K about 35 min with the dataset generation; 100 samples of `mv_niah_hard` at 300K about 18 min with the dataset generation. Server start about 2–5 min |
 
 ### Speed Tests and Profiling
 
