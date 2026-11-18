@@ -9,7 +9,8 @@ QoS wall clock caps a job at 24h. --begin only delays eligibility; it does
 not reserve a node.
 
 Idempotent. Re-running fills missing slots and replaces pending holds for a
-target day that are not a 04:00 / 20h slot. Running jobs are left alone.
+target day that sit on a retired partition. Running jobs and one-off holds on
+PARTITION are left alone.
 """
 
 import argparse
@@ -24,9 +25,9 @@ from datetime import datetime, timedelta, timezone
 TPE = timezone(timedelta(hours=8))
 
 NAME_BASE = "Jacob_GLM_hold"
-ACCOUNT = "amd-aifw-sglang"
-QOS = "amd-aifw-sglang-qos"
-PARTITION = "amd-aifw-sglang"
+ACCOUNT = "amd-aifw-sglang-v2"
+QOS = "amd-aifw-sglang-v2-qos"
+PARTITION = "amd-aifw-sglang-v2"
 GPUS = "8"
 NODES = 3
 START_HOUR = 4
@@ -144,6 +145,7 @@ def parse_job(jid):
         "end": ts(field("EndTime")),
         "timelimit": parse_timelimit(tl_raw) if tl_raw else WALL,
         "begin_dt": begin_dt,
+        "partition": field("Partition") or "",
     }
 
 
@@ -206,8 +208,8 @@ def submit(walltime, name, end, begin=None):
         f"--gpus={GPUS}",
         f"--time={fmt_timelimit(walltime)}",
         "--exclusive",
-        f"--output={os.path.expanduser('~')}/hold-alloc-%j.out",
-        f"--error={os.path.expanduser('~')}/hold-alloc-%j.err",
+        "--output=/dev/null",
+        "--error=/dev/null",
         f"--wrap={hold_body(end)}",
     ]
     if begin is not None:
@@ -295,12 +297,19 @@ def fresh_name(day, used):
 
 
 def drop_bad_pending(jobs, start):
-    """Pending jobs for this day that are not a 04:00 / 20h slot."""
+    """Pending jobs for this day on a retired partition.
+
+    Pending jobs on PARTITION that are not a 04:00 / 20h slot are one-off
+    holds the user asked for by hand and are left alone.
+    """
     day = start.strftime("%Y%m%d")
     return [
         job
         for job in jobs
-        if job["day"] == day and job["state"] == "PENDING" and not is_full_slot(job, start)
+        if job["day"] == day
+        and job["state"] == "PENDING"
+        and job.get("partition") != PARTITION
+        and not is_full_slot(job, start)
     ]
 
 
@@ -416,7 +425,7 @@ def main():
     for start, _end in windows:
         if now < start:
             bad.extend(drop_bad_pending(jobs, start))
-    if not cancel_all(bad, "cancel pending that are not 04:00/20h"):
+    if not cancel_all(bad, "cancel pending on a retired partition"):
         return
     cancelled = {job["id"] for job in bad}
     jobs = [job for job in jobs if job["id"] not in cancelled]
