@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Hold three exclusive GPU nodes on weekday mornings.
+"""Hold two exclusive GPU nodes on weekday mornings.
 
-Each Monday–Friday at 04:00 Asia/Taipei, three 20h allocations start. They end
+Each Monday–Friday at 07:00 Asia/Taipei, two 17h allocations start. They end
 at 00:00 the next calendar day. Nothing new starts Saturday or Sunday.
 
-Cluster clock is UTC. 04:00 Taipei is 20:00 UTC the previous day.
+Cluster clock is UTC. 07:00 Taipei is 23:00 UTC the previous day.
 QoS wall clock caps a job at 24h. --begin only delays eligibility; it does
 not reserve a node.
 
@@ -29,9 +29,9 @@ ACCOUNT = "amd-aifw-sglang-v2"
 QOS = "amd-aifw-sglang-v2-qos"
 PARTITION = "amd-aifw-sglang-v2"
 GPUS = "8"
-NODES = 3
-START_HOUR = 4
-WALL = timedelta(hours=20)
+NODES = 2
+START_HOUR = 7
+WALL = timedelta(hours=17)
 MIN_WALL = timedelta(minutes=30)
 
 LOG = os.path.expanduser("~/hold-chain.log")
@@ -97,7 +97,7 @@ def week_monday(day):
 
 
 def weekday_windows(now, through):
-    """(start, end) in Taipei for each Mon–Fri 04:00 window still open."""
+    """(start, end) in Taipei for each Mon–Fri 07:00 window still open."""
     if now.isoweekday() <= 5:
         first = week_monday(now)
     else:
@@ -182,9 +182,9 @@ def job_window_end(job):
 def hold_body(end):
     """Sleep until the window end, not for the whole Slurm time limit.
 
-    TimeLimit starts when the job actually runs. A 20h limit that starts at
-    11:00 would still be allocated at 07:00 the next day. Exiting at 00:00
-    Taipei releases the node before the next day's 04:00 jobs are eligible.
+    TimeLimit starts when the job actually runs. A 17h limit that starts at
+    11:00 would still be allocated at 04:00 the next day. Exiting at 00:00
+    Taipei releases the node before the next day's 07:00 jobs are eligible.
     """
     end_epoch = int(end.astimezone(timezone.utc).timestamp())
     return (
@@ -278,7 +278,7 @@ def release_held(jobs, now):
 
 
 def is_full_slot(job, start):
-    """A future weekday slot: --begin at 04:00 Taipei and a 20h limit."""
+    """A future weekday slot: --begin at 07:00 Taipei and a 17h limit."""
     if job["begin_dt"] is None:
         return False
     if job["timelimit"] < WALL - timedelta(minutes=2):
@@ -299,7 +299,7 @@ def fresh_name(day, used):
 def drop_bad_pending(jobs, start):
     """Pending jobs for this day on a retired partition.
 
-    Pending jobs on PARTITION that are not a 04:00 / 20h slot are one-off
+    Pending jobs on PARTITION that are not a 07:00 / 17h slot are one-off
     holds the user asked for by hand and are left alone.
     """
     day = start.strftime("%Y%m%d")
@@ -389,7 +389,7 @@ def ensure_current(jobs, start, end, now):
                 return
             spans.append((moment, end_utc))
         return
-    log("current window already has three nodes through midnight")
+    log("current window already has two nodes through midnight")
 
 
 def main():
