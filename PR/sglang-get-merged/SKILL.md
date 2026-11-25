@@ -52,7 +52,7 @@ it within a minute once it was in a comment that tagged him.
 ```markdown
 @BBuf Could you help review and merge this PR? <one sentence: what it does, gated to what>. @Raiden-Makoto approved it but doesn't have merge permission.
 
-`/rerun-test` can't run `test_glm53_flash_eval_mi35x.py` (nightly suite), so I ran it locally at `<sha>` on 8x MI355X (`<image>`): GSM8K <score> (<n>/1319) against the 0.92 threshold; main records 0.975.
+`/rerun-test` can't run `test_glm53_flash_eval_mi35x.py` (nightly suite), so I ran it locally at `<sha>` on 8x MI355X (`<image>`): GSM8K <score> (<n>/1319) against the 0.92 threshold; the test file records 0.975 on main.
 
 NVIDIA CI is green. The only red check is `<job>`: <cause>, <evidence link or PR>.
 ```
