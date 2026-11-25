@@ -22,6 +22,7 @@ This creates symlinks from `~/.cursor/skills/<skill-name>` to the corresponding 
 | `glm53-flash` | GLM-5.3-Flash model architecture reference (hybrid KDA linear attention + MLA/DSA k-pool indexer, mHC 4-stream residual, 288-expert MoE, NoPE text tower, vision encoder, MTP), plus the MI355X PR stack to apply before rerunning benchmarks |
 | `PR/sglang-pr` | Write an sgl-project/sglang PR body: Summary / Scope / Test plan, 100 words per section, detail in tables |
 | `PR/sglang-pr-review` | Review an SGLang PR for OOP, engineering, and repo conventions (AMD gates, kernel tests). Draft locally; do not post until approved |
+| `PR/sglang-get-merged` | Get an approved SGLang PR merged by BBuf: ready checklist (NVIDIA CI, local GLM-5.3-Flash accuracy run, a cause for every red check), one-comment ask, #44415 timeline |
 | `PR/aiter-pr` | Write a ROCm/aiter PR body: Motivation / Test Plan / Test Result, 100 words per section, detail in tables |
 | `PR/sgl-amd-mono-pr` | Write and open an sgl-project/sgl-amd-mono PR: the repo template (Motivation / Modifications / Accuracy Tests / Speed Tests and Profiling / Checklist), 100 words per section, title check, fork + lint workflow |
 | `monokernel-dev` | Build or extend an sgl-amd-mono monokernel: scoping, precedents, the verification gate ladder (layer correctness, long context, microbench, GSM8K, AgentX), profiling, pitfalls; plus a GLM-5.3-Flash MTP case study and a guide for directing the agent. Tested only with Claude Opus 5.5 (High) |
