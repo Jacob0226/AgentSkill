@@ -83,7 +83,7 @@ The template asks for results **with the monokernels on and off, on the same ser
 | Layer check against SGLang's forward | `SGLANG_AMD_MONO_CHECK=1`: checks, violations, worst cosine |
 | End to end | `test/e2e/test_<model>_server.py` cases passed |
 | Task accuracy | GSM8K (or the model's eval) on vs off, same flags, with spec accept length if MTP |
-| Long-context accuracy | RULER2 NIAH at 300K and 640K on vs off (below). Required next to GSM8K, never instead of it |
+| Long-context accuracy | RULER2 NIAH at 640K on vs off: `mv_niah_basic` × 20 and `mv_niah_hard` × 100 (below). Required next to GSM8K, never instead of it |
 
 State a small accuracy move instead of hiding it: "0.912 on vs 0.907 off, one scoring pass each".
 
@@ -91,17 +91,30 @@ An accuracy run or e2e test counts only for the steps that reach the kernel. Row
 
 Accept length is evidence only with real acceptance. AgentX's golden accept length (`SGLANG_SIMULATE_ACC_LEN`, `SGLANG_SIMULATE_ACC_METHOD=match-expected`) fixes it regardless of the verify, so it says nothing about correctness.
 
-**Long context: GSM8K plus RULER at 300K and 640K.** A PR that changes kernel or forward code of a long-context model (glm53_flash, glm53, deepseek_v41) gives RULER2 NIAH at 300K and 640K with real acceptance, next to GSM8K. GSM8K prompts are shorter than the DSA index top-k, so every key is selected and the sparse selection is not tested; some paths run only past 262,144 tokens (#97's score-tile loop: RULER at 300K 0.673 on `main`, 1.000 with the fix), and AgentX contexts pass that length (#71: 178 of 312 requests at concurrency 1). Run it as #98 did:
+**Long context: GSM8K plus RULER2 at 640K.** A PR that changes kernel or forward code of a long-context model (glm53_flash, glm53, deepseek_v41) gives, with real acceptance and on vs off: GSM8K, 640K `mv_niah_basic` × 20, and 640K `mv_niah_hard` × 100. GSM8K prompts are shorter than the DSA index top-k, so every key is selected and the sparse selection is not tested; some paths run only past 262,144 tokens (#97's score-tile loop: RULER at 300K 0.673 on `main`, 1.000 with the fix), and AgentX contexts pass that length (#71: 178 of 312 requests at concurrency 1; #186's AgentX at concurrency 32: P99 762K, longest 807K). The code owner asks for RULER2 "at the longest input you benchmark", at sgl-eval's default of 100 samples a subtask (#123, #126, #129), and in #141 read the 640K 100-sample interval. Run it as follows:
 
 | Item | Setup |
 | --- | --- |
-| Main table | sgl-eval `ruler2`, `--ruler2-seq-len` 300000 and 640000, `--ruler2-tasks mk_niah_basic mk_niah_hard mv_niah_basic mv_niah_hard --ruler2-dataset-size 20`, thinking on (`--chat-template-kwarg enable_thinking=true`), `--max-tokens 8192`, `--num-threads 4`. Report each task and the mean per length. |
-| Tasks | RULER2 has 8 NIAH tasks (mk and mv, each basic / easy / medium / hard); run basic and hard of each. `mk_niah_basic`: the context is all "the special magic number for KEY is a 10-digit number" lines, give one key's number (about 100%). `mv_niah_basic`: the same, but the key has 4 numbers, give all 4 (96–100%). `mk_niah_hard`: the context is MMLU questions labelled "Question <random number>", solve one by its number, 5-shot, exact A–D (85–100%). `mv_niah_hard`: each number labels 4 questions, copy "the 3rd Question X" word for word (30–65%). The basic tasks sit near 100 with little noise, so a broken kernel (wrong DSA keys, a bad state, a wrong digit) shows in 20 samples; the hard tasks catch smaller losses but swing about 15 points at 20 samples. Do not drop to hard only. When time is short, the minimum is `mv_niah_basic` × 20 plus `mv_niah_hard` × 100. |
-| `mv_niah_hard` at 300K, 100 samples | `--ruler2-dataset-size 100 --ruler2-tasks mv_niah_hard`. 20 samples do not resolve this task: #98's off moved 64.72 → 50.00 between two identical runs. Report both scores, the samples each side scores higher, and on − off with a bootstrap 95% CI over the samples. |
+| Required | sgl-eval `ruler2`, `--ruler2-seq-len 640000`, thinking on (`--chat-template-kwarg enable_thinking=true`), `--max-tokens 8192`, `--num-threads 4`: `--ruler2-tasks mv_niah_basic --ruler2-dataset-size 20`, and `--ruler2-tasks mv_niah_hard --ruler2-dataset-size 100`. 640K passes every long-context path that 300K does (past 262,144 tokens and 98,304 keys), so 300K is not required. |
+| Extra, for a PR that changes the DSA key selection (top-k, pool select, #188) | The four tasks `mk_niah_basic mk_niah_hard mv_niah_basic mv_niah_hard` × 20 at 300K and 640K: they read different retrieval patterns. A hard task that moves at 20 samples is rerun at 100 (#188: 640K `mk_niah_hard` 100 → 85 at 20 samples, 88.00 → 88.00 at 100). |
+| Tasks | RULER2 has 8 NIAH tasks (mk and mv, each basic / easy / medium / hard). The required set is `mv_niah_basic` and `mv_niah_hard`; the extra set adds `mk_niah_basic` and `mk_niah_hard`. `mk_niah_basic`: the context is all "the special magic number for KEY is a 10-digit number" lines, give one key's number (about 100%). `mv_niah_basic`: the same, but the key has 4 numbers, give all 4 (96–100%). `mk_niah_hard`: the context is MMLU questions labelled "Question <random number>", solve one by its number, 5-shot, exact A–D (85–100%). `mv_niah_hard`: each number labels 4 questions, copy "the 3rd Question X" word for word (30–65%). The basic tasks sit near 100 with little noise, so a broken kernel (wrong DSA keys, a bad state, a wrong digit) shows in 20 samples; the hard tasks catch smaller losses but swing about 15 points at 20 samples. Do not drop to hard only: `mv_niah_basic` sits near 100, so one wrong digit or key shows in 20 samples, while `mv_niah_hard` catches smaller losses only at 100. `mk_niah_basic` is the easier half of `mv_niah_basic`, and `mk_niah_hard` swings too much at 20 samples to add to `mv_niah_hard`. |
+| `mv_niah_hard`, 100 samples | 20 samples do not resolve this task: #98's off moved 64.72 → 50.00 between two identical runs, and #141's 640K run moved 41.67 → 20.16. Even at 100 samples, two runs of one build differ by 2 to 3 points (#141). Report both scores, the samples each side scores higher, and on − off with a paired bootstrap 95% CI over the samples. |
 | Samples, not seeds | `--seed` changes only the sampling seed; the dataset is fixed, so every seed asks the same 20 questions. More seeds average sampling noise on those 20 and do not replace 100 samples. |
 | Sides | Off and on at once, on GPUs 0–3 and 4–7, the same server flags (`--max-running-requests 8 --cuda-graph-max-bs-decode 8`, 4 requests at a time, so every step up to the largest width runs the kernel). Accuracy does not depend on the GPU set, so there is no swapped round. Repeat the 100-sample run only to size the noise when on and off differ by about that much. |
 | Datasets | sgl-eval generates each length's dataset into `~/.cache/sgl_eval/ruler2`. Two servers generating one dataset at once corrupt it (`FileNotFoundError` in a `.partial` directory): give each side its own `HOME`. |
+| Datasets, one copy | Generate a length's dataset once and copy it into both sides' `HOME`, so the two sides answer the same samples. Generation needs `sgl-eval[longcontext]`, and runs a subprocess with the `python` first on `PATH`: put the sgl-eval venv's `bin` first for that command only (`/opt/venv/bin/python` gives `No module named 'sgl_eval'`, reported as the missing-extra hint). |
 | Time (GLM-5.3-Flash, TP4, MI355X) | 20 samples: about 3 min at 300K, 8 min at 640K; the four tasks at 640K about 35 min with the dataset generation; 100 samples of `mv_niah_hard` at 300K about 18 min with the dataset generation. Server start about 2–5 min |
+
+Lay the section out as #188 does: prose, then these tables in this order. One value a cell; never pack several tasks or lengths into one cell with slashes (#186's first body did, and read badly).
+
+| Table | Rows × columns |
+| --- | --- |
+| Setup | `Item \| Setup`: Stack (GPU, TP, image, SGLang and AITER commits, this branch's commit), End to end (checkpoint, MTP, KV dtype, DSA backend, state dtype, flags, the GPU set of each side), GSM8K settings, RULER2 settings |
+| Tests | `Test \| Result` (or `Kernel check \| Rows, context \| Result`): kernel checks, `test/unit`, e2e cases, negative controls |
+| GSM8K | Rows off and on (or `main` and this PR); columns Accuracy (correct / 1319) and Accept length |
+| RULER2, 20 samples | Rows the tasks (`mv_niah_basic`, or the four with their mean), then Accept length; columns off and on per length |
+| RULER2, 100 samples | Rows `<task> at <length>`; columns off, on, on − off (paired bootstrap 95% CI), samples higher on / off |
+| Command | One `bash` block with the RULER2 command |
 
 ### Speed Tests and Profiling
 
@@ -124,7 +137,7 @@ Say the run-to-run spread when it is comparable to the gain ("c1 screens at 900 
 | Control point | One concurrency past the largest width (see the template's comment above) |
 | Server command | In a `bash` block: the full `launch_server` line and every exported env var, `SGLANG_SIMULATE_ACC_*` included. Say that off drops `--monokernel-backend amd`. |
 | Client | aiperf version and source commits (InferenceX and its `utils/aiperf` submodule), and the full `aiperf profile` line in a `bash` block |
-| Aggregate JSONs | The aggregate JSON of each point (`*_local-mi355x.json`), in a gist linked from the body |
+| Aggregate JSONs | The aggregate JSON of each point (`*_local-mi355x.json`), each in its own collapsed `<details>` block in the body (`<summary>Concurrency 16, off</summary>` and a `json` code block), not a gist link. About 5 KB a point, well under the body's 65,536-character limit |
 
 When the points differ only in a few values (concurrency, MTP depth, golden accept length), give one point's commands and a table of the differences.
 
